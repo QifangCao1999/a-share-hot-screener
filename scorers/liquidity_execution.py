@@ -84,10 +84,11 @@ def compute_liquidity_execution_score(
 
     # ── LE2: 近5日均换手率（推算值, %）weight=6 ───────────
     # L=5%, T=12%, H=25%；S10 权重 5→6
+    # #3: 推算换手率子分上限 0.85（不等同于真实 turnover_rate）
     turnover_5d_approx = _calc_turnover_5d_approx(detail)
     le2_note = _build_le2_note(detail, turnover_5d_approx)
 
-    axis.items.append(score_lower_bound(
+    le2_item = score_lower_bound(
         name="turnover_avg_5d_approx",
         value=turnover_5d_approx,
         bad_threshold=5.0,
@@ -95,7 +96,12 @@ def compute_liquidity_execution_score(
         good_threshold=25.0,
         weight=6.0,
         note=le2_note,
-    ))
+    )
+    # #3: proxy 子分上限
+    if le2_item.subscore is not None and le2_item.subscore > _TURNOVER_PROXY_SUBSCORE_CAP:
+        le2_item.note += f" [proxy_capped: {le2_item.subscore:.4f}→{_TURNOVER_PROXY_SUBSCORE_CAP}]"
+        le2_item.subscore = _TURNOVER_PROXY_SUBSCORE_CAP
+    axis.items.append(le2_item)
 
     # ── LE3: 流通市值分档 weight=4 ─────────────────────
     axis.items.append(_score_float_market_cap(detail))
@@ -125,6 +131,10 @@ def compute_liquidity_execution_score(
 
 # ── 内部工具 ─────────────────────────────────────────────
 
+# #3: 换手率 proxy 子分上限（amount/float_market_cap 推算值不等同于真实换手率）
+_TURNOVER_PROXY_SUBSCORE_CAP = 0.85
+
+
 def _calc_turnover_5d_approx(detail: "HotStockDetail") -> Optional[float]:
     """推算近5日均换手率（%）= amount_avg_5d / float_market_cap * 100."""
     amt = detail.amount_avg_5d
@@ -139,7 +149,7 @@ def _build_le2_note(detail: "HotStockDetail", approx_val: Optional[float]) -> st
         return (
             f"近5日均换手率推算（amount_avg_5d/float_market_cap*100）；"
             f"approx={approx_val:.4f}%；三段型L=5%/T=12%/H=25%；"
-            "weight=6（S10从5升）；"
+            f"weight=6（S10从5升）；proxy_cap={_TURNOVER_PROXY_SUBSCORE_CAP}；"
         )
     return (
         f"近5日均换手率推算；amount_avg_5d={detail.amount_avg_5d}；"

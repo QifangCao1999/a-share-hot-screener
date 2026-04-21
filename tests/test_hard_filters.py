@@ -147,12 +147,26 @@ class TestCheckFloatMC:
 
 
 class TestCheckIpoDate:
-    def test_missing(self):
+    def test_missing_no_daily(self):
+        """ipo_date 缺失且无 daily 历史 → hard_fail."""
         r = _check_ipo_date(None)
+        assert r is not None
         assert "ipo_date_missing" in r
+
+    def test_missing_insufficient_daily(self):
+        """ipo_date 缺失且 daily 行数不足 → hard_fail."""
+        r = _check_ipo_date(None, daily_row_count=10, min_trading_days=20)
+        assert r is not None
+        assert "ipo_date_missing" in r
+
+    def test_missing_sufficient_daily_fallback(self):
+        """#1: ipo_date 缺失但 daily 行数足够 → warn（放行）."""
+        r = _check_ipo_date(None, daily_row_count=25, min_trading_days=20)
+        assert r == "_warn_"
 
     def test_empty_string(self):
         r = _check_ipo_date("")
+        assert r is not None
         assert "ipo_date_missing" in r
 
     def test_valid(self):
@@ -236,21 +250,41 @@ class TestApplyHardFilters:
         assert "industry_finance" in reasons_str
         assert "price_too_low" in reasons_str
 
-    def test_ipo_date_missing_hard_fail(self, default_config):
+    def test_ipo_date_missing_no_daily_hard_fail(self, default_config):
+        """ipo_date 缺失且无 daily 历史 → hard_fail."""
         result = apply_hard_filters(
             config=default_config,
             name="某某股份",
             industry="半导体",
-            ipo_date=None,          # 强制 hard_fail
+            ipo_date=None,
             listing_days=None,
             latest_price=50.0,
             latest_volume=1_000_000,
             amount_1d=5e8,
             amount_avg_5d=5e8,
             float_market_cap=5e9,
+            daily_row_count=None,  # 无 daily 历史
         )
         assert result.passed is False
         assert any("ipo_date_missing" in r for r in result.fail_reasons)
+
+    def test_ipo_date_missing_with_daily_fallback(self, default_config):
+        """#1: ipo_date 缺失但 daily 历史足够 → 放行（warn）."""
+        result = apply_hard_filters(
+            config=default_config,
+            name="某某股份",
+            industry="半导体",
+            ipo_date=None,
+            listing_days=None,
+            latest_price=50.0,
+            latest_volume=1_000_000,
+            amount_1d=5e8,
+            amount_avg_5d=5e8,
+            float_market_cap=5e9,
+            daily_row_count=30,  # 足够
+        )
+        assert result.passed is True
+        assert any("放行" in w for w in result.data_warnings)
 
     def test_low_amount_fails(self, default_config):
         result = apply_hard_filters(

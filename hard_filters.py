@@ -84,6 +84,7 @@ def apply_hard_filters(
     amount_avg_5d: Optional[float] = None,  # 近5日均成交额（price_features，NOTE:approx）
     float_market_cap: Optional[float] = None,
     amount_tolerance_pct: Optional[float] = None,  # Session 11: 成交额容差%，优先使用 config 值
+    daily_row_count: Optional[int] = None,  # #1: 日线历史行数（用于 ipo_date 缺失时 fallback）
 ) -> HardFilterResult:
     """对单只股票应用所有硬筛规则（H1-H9），返回 HardFilterResult.
 
@@ -139,9 +140,12 @@ def apply_hard_filters(
     if r:
         fails.append(r)
 
-    # H8: IPODate 缺失（强制 hard_fail，不走 warn 分支）
-    r = _check_ipo_date(ipo_date)
-    if r:
+    # H8: IPODate 缺失（#1: 允许用 daily 历史行数 fallback）
+    r = _check_ipo_date(ipo_date, daily_row_count=daily_row_count,
+                         min_trading_days=config.min_trading_days)
+    if r == "_warn_":
+        warns.append("ipo_date 缺失但 daily 历史足够，已通过 fallback 放行（H8）")
+    elif r:
         fails.append(r)
 
     # H9: 金融行业（include_finance=True 时跳过此检查）
@@ -302,15 +306,31 @@ def _check_float_market_cap(
     return None
 
 
-def _check_ipo_date(ipo_date: Optional[str]) -> Optional[str]:
-    """H8: IPODate 缺失（强制 hard_fail）.
+def _check_ipo_date(
+    ipo_date: Optional[str],
+    daily_row_count: Optional[int] = None,
+    min_trading_days: int = 20,
+) -> Optional[str]:
+    """H8: IPODate 缺失检查（#1: 支持 daily 历史 fallback）.
 
-    IPO 日期是 listing_days 计算的依据，缺失则无法判断 H3，
-    同时可能是数据异常信号，强制 hard_fail。
+    逻辑：
+      - ipo_date 有值 → 通过
+      - ipo_date 缺失 且 daily_row_count >= min_trading_days → warn（放行）
+      - ipo_date 缺失 且 daily_row_count 不足或未知 → hard_fail
     """
-    if not ipo_date:
-        return "ipo_date_missing: 上市日期字段缺失，无法核验上市时间（hard_fail）"
-    return None
+    if ipo_date:
+        return None
+    # ipo_date 缺失，尝试 daily 历史 fallback
+    if daily_row_count is not None and daily_row_count >= min_trading_days:
+        logger.debug(
+            "[H8] ipo_date 缺失但 daily 行数=%d >= %d，fallback 放行",
+            daily_row_count, min_trading_days,
+        )
+        return "_warn_"
+    return (
+        f"ipo_date_missing: 上市日期缺失且 daily 历史不足"
+        f"（daily_rows={daily_row_count}, 要求>={min_trading_days}）"
+    )
 
 
 def _check_industry(industry: Optional[str]) -> Optional[str]:

@@ -181,6 +181,7 @@ def compute_price_features(
     raw_eod: List[Dict[str, Any]],
     trade_date_used_str: str,
     warnings: Optional[List[str]] = None,
+    code: str = "",
 ) -> PriceFeatures:
     """从 Tushare daily 原始数据计算所有日线派生特征.
 
@@ -188,6 +189,7 @@ def compute_price_features(
         raw_eod:           Tushare get_eod_prices() 返回的原始 list
         trade_date_used_str: 'YYYY-MM-DD'，as-of 截断基准日
         warnings:          可选的 warning 列表，用于追加 coverage 不足的提示
+        code:              6位纯数字股票代码（#4: 用于 infer_limit_pct 判断一字板板幅）
 
     Returns:
         PriceFeatures
@@ -223,16 +225,26 @@ def compute_price_features(
     # ── 最新日一字板判定 + 涨跌幅（Session 8 P1）────────
     o_latest = latest["open"]
     h_latest, l_latest = latest["high"], latest["low"]
-    # 一字板 proxy: open == high == low == close（浮点容差 0.5%）
+    # 一字板 proxy: OHLC 近似相等 且 涨跌幅接近板幅（#4: 增加 pct_chg 方向检查，避免停牌误计）
     if c > 0:
         price_range_pct = (h_latest - l_latest) / c
         body_pct = abs(o_latest - c) / c
-        feat.latest_is_limit_board = (price_range_pct < 0.005 and body_pct < 0.003)
+        ohlc_tight = (price_range_pct < 0.015 and body_pct < 0.005)
+    else:
+        ohlc_tight = False
     # 最新日涨跌幅
     if len(rows) >= 2:
         prev_close = rows[-2]["close"]
         if prev_close > 0:
             feat.latest_pct_change = (c - prev_close) / prev_close * 100.0
+    # #4: 一字板必须 OHLC 紧密 且 涨跌幅接近板幅（排除停牌、平盘）
+    if ohlc_tight and feat.latest_pct_change is not None:
+        from a_share_hot_screener.limit_rules import infer_limit_pct
+        limit_pct = infer_limit_pct(code)
+        # 涨跌幅绝对值达到板幅的70%以上才算一字板
+        feat.latest_is_limit_board = abs(feat.latest_pct_change) >= limit_pct * 0.70
+    else:
+        feat.latest_is_limit_board = False
 
     # ── 涨跌幅 ──────────────────────────────────────────
     feat.return_3d = _return_nd(rows, n=3)
@@ -309,7 +321,7 @@ def compute_price_features(
 
     # ── 近5日一字板 proxy 计数 ────────────────────────────
     if len(rows) >= 5:
-        feat.limit_board_count_5d = _count_limit_board_proxy(rows[-5:])
+        feat.limit_board_count_5d = _count_limit_board_proxy(rows[-5:], code=code)
     else:
         feat.coverage_notes.append("limit_board_count_5d: 行数不足 5")
 
@@ -389,22 +401,36 @@ def _count_upper_shadow(
     return count
 
 
-def _count_limit_board_proxy(rows: List[Dict]) -> int:
-    """统计近 N 行中疑似一字板/T字板的天数（proxy）.
+def _count_limit_board_proxy(rows: List[Dict], code: str = "") -> int:
+    """统计近 N 行中疑似一字板的天数（proxy）.
 
-    精确条件：open == high == low == close（严格一字板）
-    近似条件：|open - close| / close < 0.005 且 (high - low) / close < 0.015
-    NOTE: proxy，不能区分停牌与真实一字板。
+    #4 修正：必须同时满足：
+      1. OHLC 近似相等（price_range < 1.5%, body < 0.5%）
+      2. 涨跌幅绝对值 ≥ 板幅的70%（排除停牌、平盘等 0 涨跌幅的情况）
     """
+    from a_share_hot_screener.limit_rules import infer_limit_pct
+    limit_pct = infer_limit_pct(code)
+    pct_threshold = limit_pct * 0.70  # 达到板幅 70% 才算一字板
+
     count = 0
-    for r in rows:
+    for i, r in enumerate(rows):
         c = r["close"]
         if c <= 0:
             continue
         o, h, l = r["open"], r["high"], r["low"]
         price_range = (h - l) / c
         body_size = abs(o - c) / c
-        if price_range < 0.015 and body_size < 0.005:
+        if not (price_range < 0.015 and body_size < 0.005):
+            continue
+        # 检查涨跌幅方向：需要前一日收盘价
+        # 对于 rows 中第一行，无法确定前收 → 跳过
+        if i == 0:
+            continue
+        prev_close = rows[i - 1]["close"]
+        if prev_close <= 0:
+            continue
+        pct_chg = (c - prev_close) / prev_close * 100.0
+        if abs(pct_chg) >= pct_threshold:
             count += 1
     return count
 

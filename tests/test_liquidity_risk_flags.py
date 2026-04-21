@@ -95,14 +95,21 @@ class TestLiquidityExecutionScore:
         assert le1.subscore == pytest.approx(0.0)
 
     def test_le2_turnover_calc(self):
-        """LE2: turnover_avg_5d_approx = amount_avg_5d / float_market_cap * 100."""
-        from a_share_hot_screener.scorers.liquidity_execution import compute_liquidity_execution_score
-        # amount_avg_5d = 3e8, float_market_cap = 10e8 → turnover = 30% >= H=25% → score=1.0
+        """LE2: turnover_avg_5d_approx = amount_avg_5d / float_market_cap * 100.
+
+        #3: proxy 子分上限 0.85，即使换手率达到满分条件也不超过 0.85。
+        """
+        from a_share_hot_screener.scorers.liquidity_execution import (
+            compute_liquidity_execution_score, _TURNOVER_PROXY_SUBSCORE_CAP,
+        )
+        # amount_avg_5d = 3e8, float_market_cap = 10e8 → turnover = 30% >= H=25%
+        # 原本应该满分 1.0，但 proxy cap → 0.85
         detail = _make_detail(amount_avg_5d=3e8, float_market_cap=10e8)
         pool = _make_pool()
         axis = compute_liquidity_execution_score(detail, pool, enable_lhb_module=False)
         le2 = next(i for i in axis.items if i.name == "turnover_avg_5d_approx")
-        assert le2.subscore == pytest.approx(1.0)
+        assert le2.subscore == pytest.approx(_TURNOVER_PROXY_SUBSCORE_CAP)
+        assert "proxy_capped" in (le2.note or "")
 
     def test_le2_low_turnover(self):
         """LE2: 低换手率得低分."""

@@ -136,14 +136,52 @@ class TestUpperShadow:
 
 
 class TestLimitBoardProxy:
-    def test_one_bar_board(self):
-        # open≈close, high≈low → 一字板
-        rows = [{"close": 100.0, "open": 100.1, "high": 100.2, "low": 100.0}]
-        assert _count_limit_board_proxy(rows) == 1
+    def test_one_bar_board_with_limit_up(self):
+        """#4: OHLC 紧密 + 涨幅接近板幅 → 一字板."""
+        # 主板股: 前收 100 → 涨停 110 (10%)
+        rows = [
+            {"close": 100.0, "open": 100.0, "high": 100.0, "low": 100.0},
+            {"close": 110.0, "open": 110.0, "high": 110.0, "low": 110.0},
+        ]
+        assert _count_limit_board_proxy(rows, code="600519") == 1
+
+    def test_suspended_not_counted(self):
+        """#4: OHLC 紧密但涨跌幅≈0% → 停牌，不计为一字板."""
+        rows = [
+            {"close": 100.0, "open": 100.0, "high": 100.0, "low": 100.0},
+            {"close": 100.0, "open": 100.0, "high": 100.0, "low": 100.0},
+        ]
+        assert _count_limit_board_proxy(rows, code="600519") == 0
+
+    def test_chinext_20pct_limit(self):
+        """#4: 创业板 20% 板幅，主板 10% 涨幅不算一字板."""
+        # 前收 100 → 今收 110 (+10%), 创业板板幅 20%
+        # 10% < 20% * 70% = 14% → 不算一字板
+        rows = [
+            {"close": 100.0, "open": 100.0, "high": 100.0, "low": 100.0},
+            {"close": 110.0, "open": 110.0, "high": 110.0, "low": 110.0},
+        ]
+        assert _count_limit_board_proxy(rows, code="300750") == 0  # 创业板
+
+    def test_chinext_real_limit(self):
+        """#4: 创业板 20% 涨停→算一字板."""
+        rows = [
+            {"close": 100.0, "open": 100.0, "high": 100.0, "low": 100.0},
+            {"close": 120.0, "open": 120.0, "high": 120.0, "low": 120.0},
+        ]
+        assert _count_limit_board_proxy(rows, code="300750") == 1
 
     def test_normal_bar_not_board(self):
-        rows = [{"close": 100.0, "open": 98.0, "high": 103.0, "low": 97.0}]
-        assert _count_limit_board_proxy(rows) == 0
+        rows = [
+            {"close": 100.0, "open": 100.0, "high": 100.0, "low": 100.0},
+            {"close": 100.0, "open": 98.0, "high": 103.0, "low": 97.0},
+        ]
+        assert _count_limit_board_proxy(rows, code="600519") == 0
+
+    def test_single_row_skipped(self):
+        """#4: 只有1行时无法算涨跌幅，返回 0."""
+        rows = [{"close": 110.0, "open": 110.0, "high": 110.0, "low": 110.0}]
+        assert _count_limit_board_proxy(rows, code="600519") == 0
 
 
 class TestAmpAvg:

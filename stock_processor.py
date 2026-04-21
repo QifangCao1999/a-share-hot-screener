@@ -209,6 +209,7 @@ def process_single_stock(
                 raw_eod=eod_data,
                 trade_date_used_str=trade_date_str,
                 warnings=warns,
+                code=code,
             )
             apply_price_features(detail, feat)
             if detail.latest_price is None and feat.latest_close:
@@ -246,6 +247,7 @@ def process_single_stock(
             amount_1d=detail.amount_1d,
             amount_avg_5d=detail.amount_avg_5d,
             float_market_cap=detail.float_market_cap,
+            daily_row_count=len(eod_data) if eod_data else None,  # #1: IPODate fallback
         )
         detail.passed_hard_filter = hf.passed
         detail.hard_fail_reasons = hf.fail_reasons
