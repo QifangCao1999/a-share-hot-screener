@@ -70,7 +70,7 @@ class HotScreenerConfig:
     # 大规模运行后保存的横截面基准数据，用于单只查询时补充百分位分母
     baseline_pool_path: str = ""                  # 基准 pool JSON 文件路径（空=自动检测 cache_dir）
     save_baseline_pool: bool = False              # 运行完成后是否保存当前 pool 为基准
-    min_baseline_pool_size: int = 5               # scoring_pool < 此值时触发基准 pool 合并
+    min_baseline_pool_size: int = 30              # scoring_pool < 此值时触发基准 pool 合并（#2: 从5提升到30避免小样本百分位失真）
 
     # ── 时序连续性 / 趋势加速信号（Session 14 P2-6）──────
     prev_run_dir: str = ""                        # 上次运行的输出目录（空=跳过时序对比）

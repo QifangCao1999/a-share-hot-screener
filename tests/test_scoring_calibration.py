@@ -644,3 +644,112 @@ class TestCLIS10Params:
                 "--output-dir", "/tmp",
                 "--preset", "invalid_preset",
             ])
+
+
+# ════════════════════════════════════════════════════════
+# #2: 小股票池百分位失真修正
+# ════════════════════════════════════════════════════════
+
+class TestSmallPoolPercentileFix:
+    """小股票池百分位修正（#2）的测试."""
+
+    def test_large_pool_no_cap(self):
+        """池子 >= 30 时不限制子分，HT1 可以达到满分."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score, SMALL_POOL_THRESHOLD
+        pool = _make_pool(
+            pool_return_5d=list(range(1, 32)),   # 31只
+            pool_return_10d=list(range(1, 32)),
+            stock_count=31,
+        )
+        # return_5d=31 是池中最高 → 百分位 100%
+        d = _make_detail(return_5d=31.0, return_10d=31.0)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        assert ht1.subscore == 1.0  # 无 cap
+        assert "small_pool_cap" not in (ht1.note or "")
+
+    def test_small_pool_capped_at_090(self):
+        """池子 < 30 但 >= 2 时，HT1/HT2 子分上限 0.90."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score, SMALL_POOL_SUBSCORE_CAP
+        pool = _make_pool(
+            pool_return_5d=[1.0, 2.0, 3.0, 4.0, 5.0],  # 5只
+            pool_return_10d=[1.0, 2.0, 3.0, 4.0, 5.0],
+            stock_count=5,
+        )
+        # return_5d=5.0 是池中最高，原本百分位=100% → subscore=1.0
+        # 但因小池 cap → 子分 <= 0.90
+        d = _make_detail(return_5d=5.0, return_10d=5.0)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        assert ht1.subscore <= SMALL_POOL_SUBSCORE_CAP
+        assert "small_pool_cap" in (ht1.note or "")
+
+        ht2 = [i for i in axis.items if i.name == "return_10d_pctile"][0]
+        assert ht2.subscore <= SMALL_POOL_SUBSCORE_CAP
+
+    def test_tiny_pool_uses_absolute_fallback(self):
+        """池子 < 2 时 HT1/HT2 使用绝对涨幅 fallback."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score, TINY_POOL_SUBSCORE_CAP
+        pool = _make_pool(
+            pool_return_5d=[],  # 空池
+            pool_return_10d=[],
+            stock_count=0,
+        )
+        # return_5d=30% 超过 high_pct=25% → 子分 = cap = 0.70
+        d = _make_detail(return_5d=30.0, return_10d=50.0)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        assert ht1.subscore == TINY_POOL_SUBSCORE_CAP
+        assert "abs_fallback" in (ht1.note or "")
+
+        ht2 = [i for i in axis.items if i.name == "return_10d_pctile"][0]
+        assert ht2.subscore == TINY_POOL_SUBSCORE_CAP
+        assert "abs_fallback" in (ht2.note or "")
+
+    def test_absolute_fallback_low_return(self):
+        """绝对涨幅 fallback 低涨幅 → 低分."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score
+        pool = _make_pool(pool_return_5d=[], pool_return_10d=[], stock_count=0)
+        # return_5d=3% < low_pct=5% → subscore=0
+        d = _make_detail(return_5d=3.0, return_10d=5.0)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        assert ht1.subscore == 0.0
+
+    def test_absolute_fallback_mid_return(self):
+        """绝对涨幅 fallback 中等涨幅 → 中等分."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score, TINY_POOL_SUBSCORE_CAP
+        pool = _make_pool(pool_return_5d=[], pool_return_10d=[], stock_count=0)
+        # return_5d=12% = mid_pct → subscore ≈ 0.70 * 0.70 = 0.49
+        d = _make_detail(return_5d=12.0, return_10d=20.0)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        expected_mid = TINY_POOL_SUBSCORE_CAP * 0.70  # 0.49
+        assert abs(ht1.subscore - expected_mid) < 0.01
+
+    def test_absolute_fallback_none_return(self):
+        """绝对涨幅 fallback 但 return 缺失 → data_unavailable."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score
+        pool = _make_pool(pool_return_5d=[], pool_return_10d=[], stock_count=0)
+        d = _make_detail(return_5d=None, return_10d=None)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        assert ht1.is_data_available is False
+
+    def test_single_stock_pool_uses_fallback(self):
+        """只有1只股票（pool只有1个元素）→ fallback."""
+        from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score
+        pool = _make_pool(
+            pool_return_5d=[10.0],  # 1个元素 < 2
+            pool_return_10d=[15.0],
+            stock_count=1,
+        )
+        d = _make_detail(return_5d=10.0, return_10d=15.0)
+        axis = compute_hot_theme_score(d, pool)
+        ht1 = [i for i in axis.items if i.name == "return_5d_pctile"][0]
+        assert "abs_fallback" in (ht1.note or "")
+
+    def test_config_min_baseline_pool_size_default_30(self):
+        """配置默认 min_baseline_pool_size 已从 5 提升到 30."""
+        cfg = _make_config()
+        assert cfg.min_baseline_pool_size == 30

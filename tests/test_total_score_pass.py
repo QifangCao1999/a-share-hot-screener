@@ -281,6 +281,135 @@ class TestPassStage1Logic:
 
 
 # ════════════════════════════════════════════════════════
+# TestCrowdingCaps（#5）
+# ════════════════════════════════════════════════════════
+
+class TestCrowdingCaps:
+    """高位拥挤 total_score cap 规则测试."""
+
+    def _default_config(self, **overrides):
+        import datetime as dt
+        defaults = dict(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 18),
+            stock_codes=["600519"],
+            output_dir="/tmp/test",
+        )
+        defaults.update(overrides)
+        return HotScreenerConfig(**defaults)
+
+    def test_no_cap_normal_stock(self):
+        """普通股票不触发 cap."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1
+        cfg = self._default_config()
+        d = _scored_detail(total_score=0.75)
+        judge_pass_stage1(d, cfg)
+        assert d.total_score == 0.75
+        assert d.crowding_cap_applied is None
+
+    def test_cap_one_word_limit_up(self):
+        """最新日一字涨停 → total_score capped to 0.67."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1, CAP_ONE_WORD_LIMIT_UP
+        cfg = self._default_config()
+        d = _scored_detail(
+            total_score=0.80,
+            latest_is_limit_board=True,
+            latest_pct_change=9.98,  # 涨停
+        )
+        judge_pass_stage1(d, cfg)
+        assert d.total_score == CAP_ONE_WORD_LIMIT_UP
+        assert d.crowding_cap_applied is not None
+        assert any("one_word_limit_up" in r for r in d.crowding_cap_applied)
+        # 0.67 < 0.68 → 不应通过
+        assert d.pass_stage1 is False
+
+    def test_no_cap_limit_board_down(self):
+        """一字跌停不触发 cap（只 cap 涨停）."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1
+        cfg = self._default_config()
+        d = _scored_detail(
+            total_score=0.75,
+            latest_is_limit_board=True,
+            latest_pct_change=-9.98,  # 跌停
+        )
+        judge_pass_stage1(d, cfg)
+        assert d.total_score == 0.75  # 未被 cap
+
+    def test_cap_rc_very_low(self):
+        """risk_control_score < 0.30 → total_score capped to 0.66."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1, CAP_RC_VERY_LOW
+        cfg = self._default_config()
+        d = _scored_detail(
+            total_score=0.80,
+            risk_control_score=0.25,  # < 0.30
+        )
+        judge_pass_stage1(d, cfg)
+        assert d.total_score == CAP_RC_VERY_LOW
+        assert any("rc_very_low" in r for r in d.crowding_cap_applied)
+        assert d.pass_stage1 is False
+
+    def test_cap_high_deviation_shadow(self):
+        """偏离MA10>25% 且 上影线>=2 → cap 0.65."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1, CAP_HIGH_DEVIATION_SHADOW
+        cfg = self._default_config()
+        d = _scored_detail(
+            total_score=0.80,
+            abs_distance_to_ma10=0.30,    # 30% > 25%
+            upper_shadow_count_5d=3,      # >= 2
+        )
+        judge_pass_stage1(d, cfg)
+        assert d.total_score == CAP_HIGH_DEVIATION_SHADOW
+        assert any("high_dev_shadow" in r for r in d.crowding_cap_applied)
+
+    def test_multiple_caps_takes_lowest(self):
+        """多条 cap 规则同时触发 → 取最低值."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1, CAP_HIGH_DEVIATION_SHADOW
+        cfg = self._default_config()
+        d = _scored_detail(
+            total_score=0.85,
+            latest_is_limit_board=True,
+            latest_pct_change=9.98,
+            risk_control_score=0.20,
+            abs_distance_to_ma10=0.30,
+            upper_shadow_count_5d=2,
+        )
+        judge_pass_stage1(d, cfg)
+        # 三条规则全触发，cap = min(0.67, 0.66, 0.65) = 0.65
+        assert d.total_score == CAP_HIGH_DEVIATION_SHADOW
+        assert len(d.crowding_cap_applied) == 3
+
+    def test_cap_not_applied_when_score_already_low(self):
+        """total_score 已经低于 cap 时不修改."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1
+        cfg = self._default_config()
+        d = _scored_detail(
+            total_score=0.60,
+            risk_control_score=0.25,  # 触发 cap 0.66
+        )
+        judge_pass_stage1(d, cfg)
+        assert d.total_score == 0.60  # 未被拉高
+        # cap_reasons 记录了触发规则，但分数未被修改
+        assert d.crowding_cap_applied is not None  # 规则被记录
+
+    def test_cap_blocks_previously_passing_stock(self):
+        """原本能通过的股票因 cap 而不通过."""
+        from a_share_hot_screener.stage1_judge import judge_pass_stage1
+        cfg = self._default_config()
+        # 这只股票所有轴都超阈值，total=0.72 > 0.68
+        d = _scored_detail(
+            total_score=0.72,
+            hot_theme_score=0.80,
+            trend_flow_score=0.70,
+            liquidity_execution_score=0.60,
+            risk_control_score=0.28,  # 低于 0.30 → cap 0.66
+            data_coverage=0.90,
+        )
+        judge_pass_stage1(d, cfg)
+        # cap 到 0.66 < 0.68，且 rc=0.28 < 0.40
+        assert d.pass_stage1 is False
+
+
+# ════════════════════════════════════════════════════════
 # TestDataCoverageRejection
 # ════════════════════════════════════════════════════════
 

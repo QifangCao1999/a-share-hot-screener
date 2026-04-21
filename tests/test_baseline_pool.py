@@ -171,7 +171,7 @@ class TestConfigFields:
         )
         assert cfg.baseline_pool_path == ""
         assert cfg.save_baseline_pool is False
-        assert cfg.min_baseline_pool_size == 5
+        assert cfg.min_baseline_pool_size == 30  # #2: 从5提升到30
 
 
 # ════════════════════════════════════════════════════════
@@ -209,7 +209,7 @@ class TestCLIArgs:
         ])
         assert args.baseline_pool_path == ""
         assert args.save_baseline_pool is False
-        assert args.min_baseline_pool_size == 5
+        assert args.min_baseline_pool_size == 30  # #2: 从5提升到30
 
 
 # ════════════════════════════════════════════════════════

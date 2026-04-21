@@ -211,8 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-baseline-pool-size",
         type=int,
-        default=5,
-        help="scoring_pool 小于此值时触发基准 pool 合并（默认 5）",
+        default=30,
+        help="scoring_pool 小于此值时触发基准 pool 合并（默认 30，#2: 避免小样本百分位失真）",
     )
 
     # ── 时序连续性 / 趋势加速信号（Session 14 P2-6）──────

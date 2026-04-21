@@ -173,6 +173,7 @@ class HotStockDetail:
     pass_stage1: bool = False
     pass_stage1_reasons: List[str] = field(default_factory=list)
     blocked_by: List[str] = field(default_factory=list)  # Session 10: 未通过的轴列表（便于快速诊断）
+    crowding_cap_applied: Optional[List[str]] = None       # #5: 高位拥挤 cap 规则触发记录
 
     # ── structured flags（Session 6，由 compute_flags 填充）────
     # NOTE: flags 不直接进入 total_score，供第二阶段消费和 summary 输出

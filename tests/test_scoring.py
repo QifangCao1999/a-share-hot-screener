@@ -566,9 +566,11 @@ class TestHotThemeScore:
             pool_limit_up_count_10d=[1.0],
         )
         axis = compute_hot_theme_score(detail, pool)
-        # HT1/HT2/HT3 全部 pool_too_small → is_data_available=False
+        # #2: pool只有1个元素 → 绝对涨幅 fallback（is_data_available=True，但子分受限）
         ht1 = next(i for i in axis.items if i.name == "return_5d_pctile")
-        assert ht1.is_data_available is False
+        assert ht1.is_data_available is True
+        assert "abs_fallback" in (ht1.note or "")
+        assert ht1.subscore <= 0.70  # TINY_POOL_SUBSCORE_CAP
 
     def test_ht4_consec_up_days_fallback(self):
         """HT4 consec_up_days=None 时 is_data_available=False（S11 改为 consec_up_days）."""

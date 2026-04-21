@@ -1,7 +1,8 @@
-"""Stage1 通过判定模块 — 从 pipeline.py Step 8 提取（重构，不改业务逻辑）.
+"""Stage1 通过判定模块 — 从 pipeline.py Step 8 提取.
 
 负责：
   - data_coverage 阈值淡出检查
+  - 高位拥挤风控 total_score cap（#5）
   - 各轴评分阈值判定（AND 关系）
   - blocked_by 字段填充
 """
@@ -18,6 +19,13 @@ if TYPE_CHECKING:
     from a_share_hot_screener.models import HotStockDetail
 
 logger = logging.getLogger("a_share_hot_screener.stage1_judge")
+
+# ── 高位拥挤 total_score cap 规则（#5）────────────────────
+# 防止“强但不可交易”的股票因热度高而通过 pass_stage1。
+# 规则应用于 total_score 计算之后、阈值判定之前。
+CAP_ONE_WORD_LIMIT_UP = 0.67      # 最新日一字涨停 → cap
+CAP_RC_VERY_LOW = 0.66            # risk_control_score < 0.30 → cap
+CAP_HIGH_DEVIATION_SHADOW = 0.65  # 偏离MA10>25% 且 上影线≥2 → cap
 
 
 def judge_pass_stage1(
@@ -65,7 +73,10 @@ def judge_pass_stage1(
             warnings="; ".join(detail.warnings[:5]),
         )
 
-    # Step 8b: pass_stage1 各轴阈值判定
+    # Step 8b: 高位拥挤 total_score cap（#5）
+    _apply_crowding_caps(detail)
+
+    # Step 8c: pass_stage1 各轴阈值判定
     reasons_pass: List[str] = []
     reasons_fail: List[str] = []
 
@@ -122,3 +133,76 @@ def judge_pass_stage1(
         )
 
     return None
+
+
+# ════════════════════════════════════════════════════════
+# 高位拥挤风控 cap（#5）
+# ════════════════════════════════════════════════════════
+
+def _apply_crowding_caps(detail: "HotStockDetail") -> None:
+    """对高位拥挤股票施加 total_score 上限，降低误放风险.
+
+    规则（可叠加，取最低 cap）：
+      1. 最新日一字涨停 → cap 0.67
+      2. risk_control_score < 0.30 → cap 0.66
+      3. 偏离 MA10 > 25% 且 近5日上影线 ≥ 2 → cap 0.65
+
+    修改 detail.total_score 和 detail.crowding_cap_applied。
+    """
+    if detail.total_score is None:
+        return
+
+    cap: Optional[float] = None
+    cap_reasons: List[str] = []
+
+    # 规则 1: 最新日一字涨停（OHLC 近似相等 且 涨幅 > 0）
+    if (
+        detail.latest_is_limit_board is True
+        and detail.latest_pct_change is not None
+        and detail.latest_pct_change > 0
+    ):
+        cap = _tighter_cap(cap, CAP_ONE_WORD_LIMIT_UP)
+        cap_reasons.append(
+            f"one_word_limit_up: pct={detail.latest_pct_change:.2f}% → cap={CAP_ONE_WORD_LIMIT_UP}"
+        )
+
+    # 规则 2: risk_control_score 极低
+    if detail.risk_control_score is not None and detail.risk_control_score < 0.30:
+        cap = _tighter_cap(cap, CAP_RC_VERY_LOW)
+        cap_reasons.append(
+            f"rc_very_low: rc={detail.risk_control_score:.4f}<0.30 → cap={CAP_RC_VERY_LOW}"
+        )
+
+    # 规则 3: 高位偏离 + 上影线
+    abs_dev_pct = (
+        abs(detail.abs_distance_to_ma10) * 100.0
+        if detail.abs_distance_to_ma10 is not None else None
+    )
+    shadow_count = detail.upper_shadow_count_5d
+    if (
+        abs_dev_pct is not None and abs_dev_pct > 25.0
+        and shadow_count is not None and shadow_count >= 2
+    ):
+        cap = _tighter_cap(cap, CAP_HIGH_DEVIATION_SHADOW)
+        cap_reasons.append(
+            f"high_dev_shadow: MA10偏离={abs_dev_pct:.1f}%>25% 且 shadow={shadow_count}≥2 → cap={CAP_HIGH_DEVIATION_SHADOW}"
+        )
+
+    # 应用 cap
+    if cap is not None and detail.total_score > cap:
+        original = detail.total_score
+        detail.total_score = round(cap, 4)
+        logger.info(
+            "[crowding_cap] %s total_score %.4f → %.4f | %s",
+            detail.code, original, cap, "; ".join(cap_reasons),
+        )
+
+    # 记录到 detail 供输出/调试
+    detail.crowding_cap_applied = cap_reasons if cap_reasons else None
+
+
+def _tighter_cap(current: Optional[float], new: float) -> float:
+    """取更严格（更低）的 cap."""
+    if current is None:
+        return new
+    return min(current, new)
