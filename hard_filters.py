@@ -22,8 +22,9 @@
     - 多条同时命中时，全部记录到 hard_fail_reasons，primary_reason 取第一条
 
 数据容错原则：
-  - 若关键字段（price / amount）为 None → 该条规则记录 warning，不强制淘汰
-    （部分字段在 spot 降级模式下可能缺失）
+  - 核心字段（latest_price / amount_avg_5d / float_market_cap）缺失 → hard_fail
+    这些是价格/流动性/市值的基本判据，缺失意味着无法可靠筛选
+  - 非核心字段（listing_days / volume+amount_1d / industry）缺失 → warning，不强制淘汰
   - 若 ipo_date 缺失 → H8 强制 hard_fail（IPO 日期是核心防护字段）
 """
 
@@ -111,11 +112,9 @@ def apply_hard_filters(
     elif r:
         fails.append(r)
 
-    # H4: 最低价格
+    # H4: 最低价格（核心字段：缺失 → hard_fail）
     r = _check_min_price(latest_price, config.min_price)
-    if r == "_warn_":
-        warns.append("latest_price 缺失，跳过价格下限检查（H4）")
-    elif r:
+    if r:
         fails.append(r)
 
     # H5: 停牌 / 无量
@@ -129,19 +128,15 @@ def apply_hard_filters(
     elif r:
         fails.append(r)
 
-    # H6: 近5日均成交额（Session 11: 支持容差）
+    # H6: 近5日均成交额（核心字段：缺失 → hard_fail；Session 11: 支持容差）
     tol_pct = amount_tolerance_pct if amount_tolerance_pct is not None else config.amount_tolerance_pct
     r = _check_amount_avg_5d(amount_avg_5d, config.min_amount_avg_5d, tolerance_pct=tol_pct)
-    if r == "_warn_":
-        warns.append("amount_avg_5d 缺失，跳过成交额检查（H6，NOTE:tushare_amount）")
-    elif r:
+    if r:
         fails.append(r)
 
-    # H7: 流通市值
+    # H7: 流通市值（核心字段：缺失 → hard_fail）
     r = _check_float_market_cap(float_market_cap, config.min_float_market_cap)
-    if r == "_warn_":
-        warns.append("float_market_cap 缺失，跳过流通市值检查（H7）")
-    elif r:
+    if r:
         fails.append(r)
 
     # H8: IPODate 缺失（强制 hard_fail，不走 warn 分支）
@@ -226,9 +221,12 @@ def _check_listing_days(
 def _check_min_price(
     price: Optional[float], min_price: float
 ) -> Optional[str]:
-    """H4: 最新收盘价低于下限."""
+    """H4: 最新收盘价低于下限.
+
+    核心字段：price 缺失直接 hard_fail（无法判断价格是否达标）。
+    """
     if price is None:
-        return "_warn_"
+        return "insufficient_core_data: latest_price 缺失，无法判断价格（H4 hard_fail）"
     if price < min_price:
         return f"price_too_low: 最新价 {price:.2f} < 下限 {min_price:.2f}"
     return None
@@ -271,9 +269,11 @@ def _check_amount_avg_5d(
     这解决了 成交额数据精度问题。
 
     NOTE: amount_avg_5d 来自 Tushare daily，为精确成交额。
+
+    核心字段：amount_avg_5d 缺失直接 hard_fail（无法判断流动性）。
     """
     if amount_avg_5d is None:
-        return "_warn_"
+        return "insufficient_core_data: amount_avg_5d 缺失，无法判断流动性（H6 hard_fail）"
     effective_min = min_amount * (1.0 - tolerance_pct / 100.0)
     if amount_avg_5d < effective_min:
         return (
@@ -288,9 +288,12 @@ def _check_amount_avg_5d(
 def _check_float_market_cap(
     fmc: Optional[float], min_fmc: float
 ) -> Optional[str]:
-    """H7: 流通市值低于下限."""
+    """H7: 流通市值低于下限.
+
+    核心字段：float_market_cap 缺失直接 hard_fail（无法判断可执行性）。
+    """
     if fmc is None:
-        return "_warn_"
+        return "insufficient_core_data: float_market_cap 缺失，无法判断市值（H7 hard_fail）"
     if fmc < min_fmc:
         return (
             f"float_mc_too_small: 流通市值 {fmc/1e8:.1f}亿"

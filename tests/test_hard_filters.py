@@ -86,8 +86,12 @@ class TestCheckMinPrice:
     def test_above(self):
         assert _check_min_price(100.0, 3.0) is None
 
-    def test_none_warns(self):
-        assert _check_min_price(None, 3.0) == "_warn_"
+    def test_none_hard_fail(self):
+        """核心字段缺失 → hard_fail（不再是 warn）."""
+        r = _check_min_price(None, 3.0)
+        assert r is not None
+        assert "insufficient_core_data" in r
+        assert "latest_price" in r
 
 
 class TestCheckSuspended:
@@ -118,8 +122,12 @@ class TestCheckAmountAvg5d:
     def test_equal(self):
         assert _check_amount_avg_5d(2e8, 2e8) is None
 
-    def test_none_warns(self):
-        assert _check_amount_avg_5d(None, 2e8) == "_warn_"
+    def test_none_hard_fail(self):
+        """核心字段缺失 → hard_fail（不再是 warn）."""
+        r = _check_amount_avg_5d(None, 2e8)
+        assert r is not None
+        assert "insufficient_core_data" in r
+        assert "amount_avg_5d" in r
 
 
 class TestCheckFloatMC:
@@ -130,8 +138,12 @@ class TestCheckFloatMC:
     def test_ok(self):
         assert _check_float_market_cap(2e9, 1.5e9) is None
 
-    def test_none_warns(self):
-        assert _check_float_market_cap(None, 1.5e9) == "_warn_"
+    def test_none_hard_fail(self):
+        """核心字段缺失 → hard_fail（不再是 warn）."""
+        r = _check_float_market_cap(None, 1.5e9)
+        assert r is not None
+        assert "insufficient_core_data" in r
+        assert "float_market_cap" in r
 
 
 class TestCheckIpoDate:
@@ -256,23 +268,74 @@ class TestApplyHardFilters:
         assert result.passed is False
         assert any("amount_too_low" in r for r in result.fail_reasons)
 
-    def test_data_warnings_when_fields_none(self, default_config):
-        """关键字段缺失时产生 data_warnings 而非 fail."""
+    def test_core_data_missing_hard_fail(self, default_config):
+        """核心字段（price/amount/market_cap）缺失 → hard_fail."""
         result = apply_hard_filters(
             config=default_config,
             name="某某",
-            industry=None,          # 无行业 → H9 warning
+            industry=None,          # 非核心 → H9 warning
             ipo_date="20100101",
-            listing_days=None,      # 无上市天数 → H3 warning
-            latest_price=None,      # 无价格 → H4 warning
+            listing_days=None,      # 非核心 → H3 warning
+            latest_price=None,      # 核心 → H4 hard_fail
             latest_volume=None,
             amount_1d=None,
-            amount_avg_5d=None,     # 无成交额 → H6 warning
-            float_market_cap=None,  # 无市值 → H7 warning
+            amount_avg_5d=None,     # 核心 → H6 hard_fail
+            float_market_cap=None,  # 核心 → H7 hard_fail
         )
-        # 没有强制失败原因（ipo_date 有值），只有 warnings
+        assert result.passed is False
+        reasons_str = " ".join(result.fail_reasons)
+        assert "insufficient_core_data" in reasons_str
+        # 三个核心字段各产生一条 fail
+        assert len([r for r in result.fail_reasons if "insufficient_core_data" in r]) == 3
+
+    def test_non_core_missing_still_pass(self, default_config):
+        """非核心字段缺失不影响通过（listing_days/industry/volume）."""
+        result = apply_hard_filters(
+            config=default_config,
+            name="某某",
+            industry=None,          # 非核心 → warning
+            ipo_date="20100101",
+            listing_days=None,      # 非核心 → warning
+            latest_price=50.0,
+            latest_volume=None,     # 非核心 → warning
+            amount_1d=None,
+            amount_avg_5d=5e8,
+            float_market_cap=5e9,
+        )
         assert result.passed is True
-        assert len(result.data_warnings) >= 3
+        assert len(result.data_warnings) >= 2
+
+    def test_single_core_missing_fails(self, default_config):
+        """即使只有一个核心字段缺失也 hard_fail."""
+        # 仅 latest_price 缺失
+        r1 = apply_hard_filters(
+            config=default_config, name="某某", industry="电子",
+            ipo_date="20100101", listing_days=5000,
+            latest_price=None, latest_volume=1e6, amount_1d=5e8,
+            amount_avg_5d=5e8, float_market_cap=5e9,
+        )
+        assert r1.passed is False
+        assert any("latest_price" in r for r in r1.fail_reasons)
+
+        # 仅 amount_avg_5d 缺失
+        r2 = apply_hard_filters(
+            config=default_config, name="某某", industry="电子",
+            ipo_date="20100101", listing_days=5000,
+            latest_price=50.0, latest_volume=1e6, amount_1d=5e8,
+            amount_avg_5d=None, float_market_cap=5e9,
+        )
+        assert r2.passed is False
+        assert any("amount_avg_5d" in r for r in r2.fail_reasons)
+
+        # 仅 float_market_cap 缺失
+        r3 = apply_hard_filters(
+            config=default_config, name="某某", industry="电子",
+            ipo_date="20100101", listing_days=5000,
+            latest_price=50.0, latest_volume=1e6, amount_1d=5e8,
+            amount_avg_5d=5e8, float_market_cap=None,
+        )
+        assert r3.passed is False
+        assert any("float_market_cap" in r for r in r3.fail_reasons)
 
     def test_primary_reason_is_first(self, default_config):
         result = apply_hard_filters(
