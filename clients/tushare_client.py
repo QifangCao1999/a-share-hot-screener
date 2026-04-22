@@ -999,3 +999,80 @@ class TushareClient:
             total, stats['moneyflow'], stats['holdertrade'], stats['margin'], elapsed,
         )
         return stats
+
+    # ═══════════════════════════════════════════════════════
+    # 指数成分权重 (2000pt) — Phase 2 Universe Builder
+    # ═══════════════════════════════════════════════════════
+
+    def get_index_weight(
+        self,
+        index_code: str,
+        trade_date: str = "",
+        use_cache: bool = True,
+        cache_ttl: int = 86400 * 7,
+    ) -> Optional[pd.DataFrame]:
+        """获取指数成分股权重.
+
+        Args:
+            index_code: 指数代码, 如 '000300.SH' (沪深300)
+            trade_date: YYYYMMDD (不传则取最新)
+
+        Returns:
+            DataFrame: index_code, con_code(成分ts_code), trade_date, weight
+        """
+        cache_key = f"index_weight_{index_code}_{trade_date}"
+        if use_cache and self.cache:
+            cached = self.cache.get("tushare_index_weight", cache_key, ttl=cache_ttl)
+            if cached is not None:
+                try:
+                    return pd.DataFrame(cached)
+                except Exception:
+                    pass
+
+        kwargs = {"index_code": index_code}
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+
+        df = self._call(
+            "index_weight",
+            label=f"index_weight({index_code},{trade_date})",
+            **kwargs,
+        )
+        if df is not None and not df.empty and use_cache and self.cache:
+            self.cache.put("tushare_index_weight", cache_key, df.to_dict("records"), ttl=cache_ttl)
+
+        return df
+
+    def get_daily_by_date(
+        self,
+        trade_date: str,
+        use_cache: bool = True,
+        cache_ttl: int = 86400,
+    ) -> Optional[pd.DataFrame]:
+        """获取全市场单日行情.
+
+        Args:
+            trade_date: YYYYMMDD
+
+        Returns:
+            DataFrame: ts_code, trade_date, open, high, low, close,
+                       pre_close, change, pct_chg, vol(手), amount(千元)
+        """
+        cache_key = f"daily_market_{trade_date}"
+        if use_cache and self.cache:
+            cached = self.cache.get("tushare_daily_market", cache_key, ttl=cache_ttl)
+            if cached is not None:
+                try:
+                    return pd.DataFrame(cached)
+                except Exception:
+                    pass
+
+        df = self._call(
+            "daily",
+            label=f"daily(market,{trade_date})",
+            trade_date=trade_date,
+        )
+        if df is not None and not df.empty and use_cache and self.cache:
+            self.cache.put("tushare_daily_market", cache_key, df.to_dict("records"), ttl=cache_ttl)
+
+        return df
