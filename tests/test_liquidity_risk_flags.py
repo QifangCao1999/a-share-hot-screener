@@ -95,7 +95,7 @@ class TestLiquidityExecutionScore:
         assert le1.subscore == pytest.approx(0.0)
 
     def test_le2_turnover_calc(self):
-        """LE2: turnover_avg_5d_approx = amount_avg_5d / float_market_cap * 100.
+        """LE2: turnover_avg_5d = amount_avg_5d / float_market_cap * 100.
 
         #3: proxy 子分上限 0.85，即使换手率达到满分条件也不超过 0.85。
         """
@@ -107,7 +107,7 @@ class TestLiquidityExecutionScore:
         detail = _make_detail(amount_avg_5d=3e8, float_market_cap=10e8)
         pool = _make_pool()
         axis = compute_liquidity_execution_score(detail, pool, enable_lhb_module=False)
-        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d_approx")
+        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d")
         assert le2.subscore == pytest.approx(_TURNOVER_PROXY_SUBSCORE_CAP)
         assert "proxy_capped" in (le2.note or "")
 
@@ -118,7 +118,7 @@ class TestLiquidityExecutionScore:
         detail = _make_detail(amount_avg_5d=0.1e8, float_market_cap=100e8)
         pool = _make_pool()
         axis = compute_liquidity_execution_score(detail, pool, enable_lhb_module=False)
-        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d_approx")
+        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d")
         assert le2.subscore == pytest.approx(0.0)
 
     def test_le2_float_mc_missing(self):
@@ -127,7 +127,7 @@ class TestLiquidityExecutionScore:
         detail = _make_detail(amount_avg_5d=3e8, float_market_cap=None)
         pool = _make_pool()
         axis = compute_liquidity_execution_score(detail, pool, enable_lhb_module=False)
-        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d_approx")
+        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d")
         assert le2.is_data_available is False
 
     def test_le3_bracket_20_50_bn(self):
@@ -262,7 +262,7 @@ class TestRiskControlScore:
             latest_pct_change=2.0,
             amp_norm_avg_5d=1.5,           # RC2: 1.5/10=0.15 < G=0.5 → 1.0
             abs_distance_to_ma10=0.02,     # RC3: abs=2% <= G=2% → 1.0（S10阈值）
-            upper_shadow_count_5d=0,       # RC4: 无上影线 → 1.0
+            upper_reversal_count_5d=0,     # RC4: 无冲高回落 → 1.0
             return_3d=2.0,                 # RC5: 2.0/10=0.2 < G=0.8 → 1.0
             flags={                        # RC6~RC10: Session 22 新增
                 "pledge_ratio_latest": 0.0,                      # RC6 → 1.0
@@ -375,21 +375,21 @@ class TestRiskControlScore:
         assert rc3.subscore == pytest.approx(0.0)
 
     def test_rc4_no_shadow(self):
-        """RC4: upper_shadow_count_5d=0 → subscore=1.0."""
+        """RC4: upper_reversal_count_5d=0 → subscore=1.0."""
         from a_share_hot_screener.scorers.risk_control import compute_risk_control_score
-        detail = _make_detail(upper_shadow_count_5d=0)
+        detail = _make_detail(upper_reversal_count_5d=0)
         pool = _make_pool()
         axis = compute_risk_control_score(detail, pool)
-        rc4 = next(i for i in axis.items if i.name == "upper_shadow_count_5d")
+        rc4 = next(i for i in axis.items if i.name == "upper_reversal_count_5d")
         assert rc4.subscore == pytest.approx(1.0)
 
     def test_rc4_heavy_shadow(self):
-        """RC4: upper_shadow_count_5d>=3 → clamp → subscore=0.0."""
+        """RC4: upper_reversal_count_5d>=3 → clamp → subscore=0.0."""
         from a_share_hot_screener.scorers.risk_control import compute_risk_control_score
-        detail = _make_detail(upper_shadow_count_5d=4)
+        detail = _make_detail(upper_reversal_count_5d=4)
         pool = _make_pool()
         axis = compute_risk_control_score(detail, pool)
-        rc4 = next(i for i in axis.items if i.name == "upper_shadow_count_5d")
+        rc4 = next(i for i in axis.items if i.name == "upper_reversal_count_5d")
         assert rc4.subscore == pytest.approx(0.0)
 
     def test_rc5_low_return(self):

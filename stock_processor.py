@@ -68,6 +68,7 @@ def apply_price_features(detail: HotStockDetail, feat: PriceFeatures) -> None:
     detail.abs_distance_to_ma10 = feat.abs_distance_to_ma10
     detail.amp_norm_avg_5d = feat.amp_norm_avg_5d
     detail.upper_shadow_count_5d = feat.upper_shadow_count_5d
+    detail.upper_reversal_count_5d = feat.upper_reversal_count_5d
     detail.limit_board_count_5d = feat.limit_board_count_5d
     detail.eod_data_rows = feat.data_rows
 
@@ -180,6 +181,7 @@ def process_single_stock(
         pe_ttm=vs.pe_ttm,
         pb=vs.pb,
         turnover_rate_1d=vs.turnover_rate,
+        turnover_rate_f_1d=vs.turnover_rate_f,
         volume_ratio=vs.volume_ratio,
     )
 

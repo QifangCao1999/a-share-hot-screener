@@ -82,6 +82,14 @@ def apply_four_axis_scores(
             w_liquidity_execution=_w_le,
             w_risk_control=_w_rc,
         )
+        # P0-D: core/overall coverage split
+        detail.core_data_coverage, detail.overall_data_coverage = compute_coverage_split(
+            detail,
+            w_hot_theme=_w_ht,
+            w_trend_flow=_w_tf,
+            w_liquidity_execution=_w_le,
+            w_risk_control=_w_rc,
+        )
     except Exception as e:
         logger.error("compute_total_score(%s) 异常: %s", detail.code, e, exc_info=True)
         warnings.add(detail.code, f"[scoring] total_score 计算异常: {e}")
@@ -143,3 +151,46 @@ def compute_total_score(
 
     total_score = round(score_wsum / score_wdenom, 4)
     return total_score, data_coverage
+
+
+# ── P0-D: Core/Overall Coverage Split ─────────────────────
+# 核心轴: TF + LE（价格/成交量/成交额/流通市值/收益率/均线/CLV/振幅）
+# 全量轴: HT + TF + LE + RC（含事件层 + 风控增强）
+
+_CORE_AXES = {"trend_flow", "liquidity_execution"}  # TF + LE
+
+
+def compute_coverage_split(
+    detail: "HotStockDetail",
+    *,
+    w_hot_theme: float = 35.0,
+    w_trend_flow: float = 30.0,
+    w_liquidity_execution: float = 20.0,
+    w_risk_control: float = 15.0,
+) -> tuple:
+    """P0-D: 计算 core_data_coverage 和 overall_data_coverage.
+
+    core = TF + LE 的加权覆盖率（价格/成交量/市值等基础数据）
+    overall = 全部四轴的加权覆盖率（含事件层/风控增强）
+
+    Returns:
+        (core_data_coverage, overall_data_coverage)
+    """
+    axes = [
+        ("hot_theme",            detail.hot_theme_coverage or 0.0,            w_hot_theme),
+        ("trend_flow",           detail.trend_flow_coverage or 0.0,           w_trend_flow),
+        ("liquidity_execution",  detail.liquidity_execution_coverage or 0.0,  w_liquidity_execution),
+        ("risk_control",         detail.risk_control_coverage or 0.0,         w_risk_control),
+    ]
+
+    # overall: 全部轴
+    overall_wsum = sum(cov * w for _, cov, w in axes)
+    overall_denom = sum(w for _, _, w in axes)
+    overall = round(overall_wsum / overall_denom, 4) if overall_denom > 0 else 0.0
+
+    # core: 只取 TF + LE
+    core_wsum = sum(cov * w for name, cov, w in axes if name in _CORE_AXES)
+    core_denom = sum(w for name, _, w in axes if name in _CORE_AXES)
+    core = round(core_wsum / core_denom, 4) if core_denom > 0 else 0.0
+
+    return core, overall

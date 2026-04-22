@@ -272,7 +272,7 @@ class TestLEWeights:
         detail = _make_detail(amount_avg_5d=50e8, float_market_cap=100e8)
         pool = _make_pool()
         axis = compute_liquidity_execution_score(detail, pool, enable_lhb_module=False)
-        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d_approx")
+        le2 = next(i for i in axis.items if i.name == "turnover_avg_5d")
         assert le2.weight == pytest.approx(6.0)
 
     def test_le4_weight(self):

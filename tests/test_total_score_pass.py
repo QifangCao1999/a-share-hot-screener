@@ -355,11 +355,11 @@ class TestCrowdingCaps:
         d = _scored_detail(
             total_score=0.80,
             abs_distance_to_ma10=0.30,    # 30% > 25%
-            upper_shadow_count_5d=3,      # >= 2
+            upper_reversal_count_5d=3,    # >= 2
         )
         judge_pass_stage1(d, cfg)
         assert d.total_score == CAP_HIGH_DEVIATION_SHADOW
-        assert any("high_dev_shadow" in r for r in d.crowding_cap_applied)
+        assert any("high_dev_reversal" in r for r in d.crowding_cap_applied)
 
     def test_multiple_caps_takes_lowest(self):
         """多条 cap 规则同时触发 → 取最低值."""
@@ -371,7 +371,7 @@ class TestCrowdingCaps:
             latest_pct_change=9.98,
             risk_control_score=0.20,
             abs_distance_to_ma10=0.30,
-            upper_shadow_count_5d=2,
+            upper_reversal_count_5d=2,
         )
         judge_pass_stage1(d, cfg)
         # 三条规则全触发，cap = min(0.67, 0.66, 0.65) = 0.65

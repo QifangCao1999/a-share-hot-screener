@@ -8,6 +8,7 @@
        Session 10: 权重 8→9（填补 LE4 降权）
   LE2  近5日均换手率              weight=6  三段下限型（L=5%,T=12%,H=25%）
        Session 10: 权重 5→6（填补 LE4 降权）
+       P0-B: 优先级 turnover_rate_f > turnover_rate > amount_proxy(子分cap 0.85)
   LE3  流通市值分档               weight=4  离散型（大盘友好分档，S10 重校准）
   LE4  近20日龙虎榜上榜次数       weight=1  离散型（enable_lhb=True 时有效；S10 降权 3→1）
 ──────────────────────────────────────────────────────
@@ -82,25 +83,27 @@ def compute_liquidity_execution_score(
         ),
     ))
 
-    # ── LE2: 近5日均换手率（推算值, %）weight=6 ───────────
+    # ── LE2: 近5日均换手率 weight=6 ─────────────────────
+    # P0-B: 优先级 turnover_rate_f > turnover_rate > amount_proxy
     # L=5%, T=12%, H=25%；S10 权重 5→6
-    # #3: 推算换手率子分上限 0.85（不等同于真实 turnover_rate）
-    turnover_5d_approx = _calc_turnover_5d_approx(detail)
-    le2_note = _build_le2_note(detail, turnover_5d_approx)
+    turnover_val, turnover_method, is_proxy = _resolve_turnover(detail)
+    le2_note = _build_le2_note_v2(detail, turnover_val, turnover_method)
 
     le2_item = score_lower_bound(
-        name="turnover_avg_5d_approx",
-        value=turnover_5d_approx,
+        name="turnover_avg_5d",
+        value=turnover_val,
         bad_threshold=5.0,
         mid_threshold=12.0,
         good_threshold=25.0,
         weight=6.0,
         note=le2_note,
     )
-    # #3: proxy 子分上限
-    if le2_item.subscore is not None and le2_item.subscore > _TURNOVER_PROXY_SUBSCORE_CAP:
+    # #3: proxy 子分上限（仅当来源为 amount_proxy 时）
+    if is_proxy and le2_item.subscore is not None and le2_item.subscore > _TURNOVER_PROXY_SUBSCORE_CAP:
         le2_item.note += f" [proxy_capped: {le2_item.subscore:.4f}→{_TURNOVER_PROXY_SUBSCORE_CAP}]"
         le2_item.subscore = _TURNOVER_PROXY_SUBSCORE_CAP
+    # 写回 turnover_method 供输出
+    detail.turnover_method = turnover_method
     axis.items.append(le2_item)
 
     # ── LE3: 流通市值分档 weight=4 ─────────────────────
@@ -135,24 +138,53 @@ def compute_liquidity_execution_score(
 _TURNOVER_PROXY_SUBSCORE_CAP = 0.85
 
 
-def _calc_turnover_5d_approx(detail: "HotStockDetail") -> Optional[float]:
-    """推算近5日均换手率（%）= amount_avg_5d / float_market_cap * 100."""
+def _resolve_turnover(detail: "HotStockDetail") -> tuple:
+    """P0-B: 按优先级解析换手率.
+
+    优先级:
+      1. turnover_rate_f_1d (自由流通换手率，最准确)
+      2. turnover_rate_1d (总股本换手率，次选)
+      3. amount_avg_5d / float_market_cap * 100 (proxy，子分 cap 0.85)
+
+    Returns:
+        (value, method, is_proxy)
+    """
+    # 1. turnover_rate_f
+    trf = getattr(detail, 'turnover_rate_f_1d', None)
+    if trf is not None and trf > 0:
+        return trf, "turnover_rate_f", False
+
+    # 2. turnover_rate
+    tr = detail.turnover_rate_1d
+    if tr is not None and tr > 0:
+        return tr, "turnover_rate", False
+
+    # 3. amount proxy
     amt = detail.amount_avg_5d
     fmc = detail.float_market_cap
-    if amt is None or fmc is None or fmc <= 0:
-        return None
-    return amt / fmc * 100.0
+    if amt is not None and fmc is not None and fmc > 0:
+        return amt / fmc * 100.0, "amount_proxy", True
+
+    return None, "none", True
 
 
-def _build_le2_note(detail: "HotStockDetail", approx_val: Optional[float]) -> str:
-    if approx_val is not None:
+def _build_le2_note_v2(
+    detail: "HotStockDetail",
+    value: Optional[float],
+    method: str,
+) -> str:
+    if value is not None:
         return (
-            f"近5日均换手率推算（amount_avg_5d/float_market_cap*100）；"
-            f"approx={approx_val:.4f}%；三段型L=5%/T=12%/H=25%；"
-            f"weight=6（S10从5升）；proxy_cap={_TURNOVER_PROXY_SUBSCORE_CAP}；"
+            f"近5日均换手率（P0-B: method={method}）；"
+            f"value={value:.4f}%；三段型L=5%/T=12%/H=25%；"
+            f"weight=6；"
+            + (f"proxy_cap={_TURNOVER_PROXY_SUBSCORE_CAP}" if method == "amount_proxy" else "no_cap")
         )
     return (
-        f"近5日均换手率推算；amount_avg_5d={detail.amount_avg_5d}；"
+        f"LE2 换手率；method={method}；"
+        f"turnover_rate_f={getattr(detail, 'turnover_rate_f_1d', None)}；"
+        f"turnover_rate={detail.turnover_rate_1d}；"
+        f"amount_avg_5d={detail.amount_avg_5d}；"
         f"float_market_cap={detail.float_market_cap}；"
         "data_missing"
     )

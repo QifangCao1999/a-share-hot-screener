@@ -56,6 +56,7 @@ class ValidatedHotStock:
     prev_close: Optional[float] = None          # 昨收价
     volume_ratio: Optional[float] = None        # 量比
     turnover_rate: Optional[float] = None       # 换手率（%）
+    turnover_rate_f: Optional[float] = None     # 自由流通换手率（%，P0-B）
     pe_ttm: Optional[float] = None              # 市盈率-动态
     pb: Optional[float] = None                  # 市净率
     market_cap: Optional[float] = None          # 总市值（元）
@@ -92,7 +93,8 @@ class HotStockDetail:
 
     # ── spot 实时量价字段（来自 Tushare daily_basic，初始化时写入）──
     pct_change_1d: Optional[float] = None       # 当日涨跌幅（%，spot）
-    turnover_rate_1d: Optional[float] = None    # 当日换手率（%，spot）
+    turnover_rate_1d: Optional[float] = None    # 当日换手率（%，spot总股本）
+    turnover_rate_f_1d: Optional[float] = None  # 当日自由流通换手率（%，spot，P0-B）
     amount_1d: Optional[float] = None           # 当日成交额（元，spot）
     amplitude: Optional[float] = None           # 当日振幅（%，spot）
     volume_ratio: Optional[float] = None        # 量比（spot）
@@ -113,9 +115,11 @@ class HotStockDetail:
     amount_ratio_5d_to_20d: Optional[float] = None  # 近5日均额 / 近20日均额
     abs_distance_to_ma10: Optional[float] = None    # (close-MA10)/MA10
     amp_norm_avg_5d: Optional[float] = None     # 近5日平均振幅（%）
-    upper_shadow_count_5d: Optional[int] = None # 近5日显著上影线天数（proxy）
+    upper_shadow_count_5d: Optional[int] = None # 近5日显著上影线天数（K线形态）
+    upper_reversal_count_5d: Optional[int] = None # 近5日冲高回落天数（交易风险信号，P0-A）
     limit_board_count_5d: Optional[int] = None  # 近5日疑似一字板/T字板天数（proxy）
     eod_data_rows: int = 0                      # EOD 实际可用行数
+    turnover_method: str = ""                    # P0-B: 换手率来源 turnover_rate_f|turnover_rate|amount_proxy
 
     # ── 均线字段（Session 8 P1 填充）────────────────────
     ma5: Optional[float] = None                 # MA5
@@ -167,13 +171,19 @@ class HotStockDetail:
     risk_control_subscores: Dict[str, Any] = field(default_factory=dict)
 
     total_score: Optional[float] = None
-    data_coverage: Optional[float] = None
+    data_coverage: Optional[float] = None          # 总体覆盖率（向后兼容）
+    core_data_coverage: Optional[float] = None     # P0-D: 核心数据覆盖率
+    overall_data_coverage: Optional[float] = None  # P0-D: 全量数据覆盖率
 
     # ── pass_stage1 判定（TODO: Session 4+）─────────────────
-    pass_stage1: bool = False
+    pass_stage1: bool = False                    # P0-C: = tradeable only
+    pass_stage1_watch: bool = False              # P0-C: 观察池（强但不可交易）
+    pass_stage1_any: bool = False                # P0-C: tradeable ∪ watch_only
+    candidate_pool_type: str = ""                # P0-C: tradeable/watch_only/failed_score/insufficient_data/rejected_hard
+    candidate_pool_reason: str = ""              # P0-C: 具体原因
     pass_stage1_reasons: List[str] = field(default_factory=list)
-    blocked_by: List[str] = field(default_factory=list)  # Session 10: 未通过的轴列表（便于快速诊断）
-    crowding_cap_applied: Optional[List[str]] = None       # #5: 高位拥挤 cap 规则触发记录
+    blocked_by: List[str] = field(default_factory=list)
+    crowding_cap_applied: Optional[List[str]] = None
 
     # ── structured flags（Session 6，由 compute_flags 填充）────
     # NOTE: flags 不直接进入 total_score，供第二阶段消费和 summary 输出
@@ -243,7 +253,11 @@ class HotStockSummary:
     validation_status: str = "valid"              # Tushare ts_code
     input_order: int = 0
     pass_stage1: bool = False
-    blocked_by: List[str] = field(default_factory=list)  # Session 10: 未通过的轴列表
+    pass_stage1_watch: bool = False              # P0-C
+    pass_stage1_any: bool = False                # P0-C
+    candidate_pool_type: str = ""                # P0-C
+    candidate_pool_reason: str = ""              # P0-C
+    blocked_by: List[str] = field(default_factory=list)
 
     # ── 基础信息 ─────────────────────────────────
     industry: str = ""                            # Tushare ts_code
@@ -277,10 +291,13 @@ class HotStockSummary:
     liquidity_execution_score: Optional[float] = None
     risk_control_score: Optional[float] = None
     data_coverage: Optional[float] = None
+    core_data_coverage: Optional[float] = None     # P0-D
+    overall_data_coverage: Optional[float] = None  # P0-D
     hot_theme_coverage: Optional[float] = None
     trend_flow_coverage: Optional[float] = None
     liquidity_execution_coverage: Optional[float] = None
     risk_control_coverage: Optional[float] = None
+    turnover_method: str = ""                      # P0-B
 
     # ── 硬筛结果 ─────────────────────────────────
     passed_hard_filter: bool = False

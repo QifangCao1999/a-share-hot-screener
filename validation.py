@@ -109,6 +109,7 @@ class SpotUniverse:
             entry["name"] = ""  # daily_basic 不含 name，后续从 stock_basic 补充
             entry["latest_price"] = _safe_float(row.get("close"))
             entry["turnover_rate"] = _safe_float(row.get("turnover_rate"))
+            entry["turnover_rate_f"] = _safe_float(row.get("turnover_rate_f"))  # P0-B: 自由流通换手率
             entry["volume_ratio"] = _safe_float(row.get("volume_ratio"))
             entry["pe_ttm"] = _safe_float(row.get("pe_ttm"))
             entry["pb"] = _safe_float(row.get("pb"))
@@ -278,6 +279,7 @@ class StockValidator:
                 validation_status="valid",
                 latest_price=spot.get("latest_price"),
                 turnover_rate=spot.get("turnover_rate"),
+                turnover_rate_f=spot.get("turnover_rate_f"),  # P0-B
                 pe_ttm=spot.get("pe_ttm"),
                 pb=spot.get("pb"),
                 market_cap=spot.get("market_cap"),

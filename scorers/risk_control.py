@@ -9,7 +9,8 @@
   RC2  近5日均振幅/涨跌停幅度     weight=3  三段上限型（G=0.5,T=1.0,B=1.8）clamp=2.0
   RC3  收盘价偏离10日均线绝对值   weight=4  三段上限型（G=2%,T=6%,B=15%）
        Session 10 改动：从 G=3%/T=10%/B=20% 收紧为 G=2%/T=6%/B=15%
-  RC4  近5日长上影/炸板proxy次数  weight=2  离散型（0=1.0,1=0.70,2=0.40,≥3=0.0）
+  RC4  近5日冲高回落次数(P0-A)  weight=2  离散型（0=1.0,1=0.70,2=0.40,≥3=0.0）
+       P0-A 改动：使用 upper_reversal_ratio>=0.45 且 amp>=5%（风险导向）
   RC5  近3日累计涨幅/涨跌停幅度   weight=2  三段上限型（G=0.8,T=1.8,B=3.5）clamp=[-4,4]
   RC6  质押比例(%)               weight=2  三段上限型（G=5,T=20,B=40）
        Session 22 新增：从 flags["pledge_ratio_latest"] 读取
@@ -106,16 +107,16 @@ def compute_risk_control_score(
         ),
     ))
 
-    # ── RC4: 近5日上影线 proxy 次数（离散型）weight=2
+    # ── RC4: 近5日冲高回落次数（P0-A: upper_reversal_ratio）weight=2
     axis.items.append(score_discrete(
-        name="upper_shadow_count_5d",
-        value=detail.upper_shadow_count_5d,
+        name="upper_reversal_count_5d",
+        value=detail.upper_reversal_count_5d,
         mapping=_RC4_SHADOW_MAP,
         default_score=None,
         weight=2.0,
         note=(
-            "近5日长上影/炸板proxy次数；"
-            "proxy_rule: (high-close)/(high-low)>=0.45 and amp>=5%；"
+            "近5日冲高回落次数（P0-A）；"
+            "rule: upper_reversal_ratio(high,low,close)>=0.45 AND amp_pct>=5%；"
             "0=1.0/1=0.70/2=0.40/≥3=0.0"
         ),
     ))

@@ -276,9 +276,9 @@ def compute_hot_theme_score(
     ))
 
     # ── HT5: 行业近5日强度百分位 → 三段型（L=55,T=75,H=90）weight=7
-    # industry_heat_pctile_5d 已是 0~1 百分位，先转为 0~100 再映射
+    # P0-E: degraded 模式子分上限 0.80
     industry_pctile_100 = detail.industry_heat_pctile_5d * 100.0 if detail.industry_heat_pctile_5d is not None else None
-    axis.items.append(score_lower_bound(
+    ht5_item = score_lower_bound(
         name="industry_heat_pctile_5d",
         value=industry_pctile_100,
         bad_threshold=55.0,
@@ -291,7 +291,18 @@ def compute_hot_theme_score(
             + ("" if detail.industry_heat_pctile_5d is not None
                else "; industry_heat_not_available")
         ),
-    ))
+    )
+    # P0-E: degraded cap
+    _HT5_DEGRADED_CAP = 0.80
+    if (
+        detail.industry_heat_source
+        and "degraded" in detail.industry_heat_source
+        and ht5_item.subscore is not None
+        and ht5_item.subscore > _HT5_DEGRADED_CAP
+    ):
+        ht5_item.note += f"; ht5_degraded_cap={_HT5_DEGRADED_CAP}(raw={ht5_item.subscore:.4f})"
+        ht5_item.subscore = _HT5_DEGRADED_CAP
+    axis.items.append(ht5_item)
 
     # ── HT6: 概念板块热度百分位 → 三段下限型（L=55,T=75,H=90）weight=7
     # 仅在 enable_concept_heat_module=True 且概念模块实际可用时纳入评分

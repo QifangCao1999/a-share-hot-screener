@@ -144,10 +144,15 @@ class PriceFeatures:
     # NOTE: 振幅 = (high - low) / prev_close
     amp_norm_avg_5d: Optional[float] = None    # 近5日归一化振幅均值（%）
 
-    # ── 上影线计数（近5日，proxy：upper_shadow > close*0.02）
-    # upper_shadow = high - max(open, close)
-    # NOTE: 此为 proxy，不能精确区分"真上影"与盘中波动
+    # ── 上影线计数（近5日，K线形态描述）
+    # 使用 upper_wick_ratio: (high - max(open, close)) / (high - low)
+    # 阈值: upper_wick_ratio >= 0.30（形态显著上影线）
     upper_shadow_count_5d: Optional[int] = None
+
+    # ── 冲高回落计数（近5日，交易风险信号）P0-A 新增
+    # 使用 upper_reversal_ratio: (high - close) / (high - low)
+    # 阈值: upper_reversal_ratio >= 0.45 且 amplitude_pct >= 5%
+    upper_reversal_count_5d: Optional[int] = None
 
     # ── 一字板 proxy 计数（近5日）
     # 一字板 proxy：open == high == low == close（精确）或
@@ -313,11 +318,17 @@ def compute_price_features(
     else:
         feat.coverage_notes.append("amp_norm_avg_5d: 行数不足 5")
 
-    # ── 近5日上影线计数（proxy）──────────────────────────
+    # ── 近5日上影线计数（K线形态）──────────────────────────
     if len(rows) >= 5:
         feat.upper_shadow_count_5d = _count_upper_shadow(rows[-5:], threshold_pct=0.02)
     else:
         feat.coverage_notes.append("upper_shadow_count_5d: 行数不足 5")
+
+    # ── 近5日冲高回落计数（P0-A: 交易风险信号）─────────────
+    if len(rows) >= 5:
+        feat.upper_reversal_count_5d = _count_upper_reversal(rows[-5:])
+    else:
+        feat.coverage_notes.append("upper_reversal_count_5d: 行数不足 5")
 
     # ── 近5日一字板 proxy 计数 ────────────────────────────
     if len(rows) >= 5:
@@ -460,6 +471,32 @@ def _count_big_up_days(rows: List[Dict], n: int = 10, threshold_pct: float = 5.0
             continue
         pct_change = (cur_close - prev_close) / prev_close * 100.0
         if pct_change > threshold_pct:
+            count += 1
+    return count
+
+
+def _count_upper_reversal(rows: List[Dict]) -> int:
+    """统计近 N 行中冲高回落风险天数（P0-A 新增）.
+
+    条件（同时满足）：
+      1. upper_reversal_ratio(high, low, close) >= 0.45
+      2. amplitude_pct = (high - low) / prev_close >= 5%
+
+    第一行无 prev_close 时用 open 代替。
+    """
+    from a_share_hot_screener.indicators import upper_reversal_ratio
+
+    count = 0
+    for i, r in enumerate(rows):
+        h, l, c = r["high"], r["low"], r["close"]
+        if c <= 0 or h <= l:
+            continue
+        # amplitude 用 prev_close 归一化
+        prev_close = rows[i - 1]["close"] if i > 0 else r["open"]
+        if prev_close <= 0:
+            continue
+        amp_pct = (h - l) / prev_close * 100.0
+        if amp_pct >= 5.0 and upper_reversal_ratio(h, l, c) >= 0.45:
             count += 1
     return count
 
