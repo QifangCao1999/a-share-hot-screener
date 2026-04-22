@@ -95,6 +95,8 @@ class EventLayerContext:
 
     concept_cons_map: Dict[str, List[str]] = field(default_factory=dict)
     industry_cons_map: Dict[str, str] = field(default_factory=dict)
+    # 桥接映射: stock_basic.industry → ths_index 行业名
+    basic_industry_to_ths: Dict[str, str] = field(default_factory=dict)
 
     global_warnings: List[str] = field(default_factory=list)
 
@@ -362,7 +364,8 @@ class EventLayerLoader:
                 ctx.industry_rank_pctile[name] = pctile
                 ctx.industry_hist_map[name] = pct
 
-            # 6. 建立股票→行业映射（使用 index_member_all）
+            # 6. 建立股票→行业映射（使用 index_member_all + L3→L2→L1 级联匹配）
+            ths_name_set = set(ctx.industry_rank_pctile.keys())
             member_df = self._ts.get_index_member_all()
             if member_df is not None and not member_df.empty:
                 current = member_df[
@@ -371,23 +374,91 @@ class EventLayerLoader:
                 for _, row in current.iterrows():
                     stock_ts = str(row.get("ts_code", ""))
                     code6 = stock_ts.split(".")[0] if "." in stock_ts else stock_ts
-                    if len(code6) == 6 and code6.isdigit():
-                        l1_name = str(row.get("l1_name", ""))
-                        if l1_name:
-                            ctx.industry_cons_map[code6] = l1_name
+                    if not (len(code6) == 6 and code6.isdigit()):
+                        continue
+                    # 级联匹配: L3 → L2 → L1，取最具体的匹配
+                    l3 = str(row.get("l3_name", ""))
+                    l2 = str(row.get("l2_name", ""))
+                    l1 = str(row.get("l1_name", ""))
+                    matched = ""
+                    if l3 and l3 in ths_name_set:
+                        matched = l3
+                    elif l2 and l2 in ths_name_set:
+                        matched = l2
+                    elif l1 and l1 in ths_name_set:
+                        matched = l1
+                    if matched:
+                        ctx.industry_cons_map[code6] = matched
+
+            # 7. 构建 stock_basic.industry → ths 名称桥接映射
+            #    用已映射的股票作为桥梁：找每个 basic.industry 最常见的 ths 名称
+            self._build_basic_industry_bridge(ctx, ths_name_set)
 
             ctx.industry_heat_mode = "ths_daily_full"
             ctx.industry_snapshot_days_used = len(daily_frames)
+            direct_mapped = len(ctx.industry_cons_map)
+            bridge_mapped = len(ctx.basic_industry_to_ths)
             logger.info(
-                "[event_layer] 行业热度完整版加载成功: %d 个行业, %d 只股票映射, %d 天数据",
-                len(ctx.industry_rank_pctile), len(ctx.industry_cons_map),
-                len(daily_frames),
+                "[event_layer] 行业热度完整版加载成功: %d 个行业, "
+                "%d 只直接映射, %d 个行业名桥接, %d 天数据",
+                len(ctx.industry_rank_pctile), direct_mapped,
+                bridge_mapped, len(daily_frames),
             )
             return True
 
         except Exception as e:
             logger.warning("[event_layer] 行业热度完整版加载失败，降级: %s", e)
             return False
+
+    def _build_basic_industry_bridge(
+        self, ctx: EventLayerContext, ths_name_set: set,
+    ) -> None:
+        """Build bridge mapping: stock_basic.industry → ths_index name.
+
+        For stocks that are in *both* industry_cons_map and stock_basic,
+        count which ths name is most common for each basic.industry value.
+        This lets unmapped stocks (not in index_member_all) use their
+        stock_basic.industry to look up industry heat.
+        """
+        try:
+            basic_df = self._ts.get_stock_basic()
+            if basic_df is None or basic_df.empty:
+                return
+
+            # Build code6 → basic.industry
+            code_to_basic_ind: Dict[str, str] = {}
+            for _, row in basic_df.iterrows():
+                ts_code = str(row.get("ts_code", ""))
+                code6 = ts_code.split(".")[0] if "." in ts_code else ts_code
+                ind = str(row.get("industry", ""))
+                if len(code6) == 6 and ind:
+                    code_to_basic_ind[code6] = ind
+
+            # Count: basic_industry → {ths_name: count}
+            from collections import Counter
+            bridge_votes: Dict[str, Counter] = {}
+            for code6, ths_name in ctx.industry_cons_map.items():
+                basic_ind = code_to_basic_ind.get(code6, "")
+                if basic_ind:
+                    if basic_ind not in bridge_votes:
+                        bridge_votes[basic_ind] = Counter()
+                    bridge_votes[basic_ind][ths_name] += 1
+
+            # Pick the most common ths_name for each basic.industry
+            for basic_ind, votes in bridge_votes.items():
+                best_ths, _count = votes.most_common(1)[0]
+                ctx.basic_industry_to_ths[basic_ind] = best_ths
+
+            # Also include direct matches: basic.industry names that
+            # happen to exist in ths_name_set
+            for basic_ind in code_to_basic_ind.values():
+                if basic_ind in ths_name_set and basic_ind not in ctx.basic_industry_to_ths:
+                    ctx.basic_industry_to_ths[basic_ind] = basic_ind
+
+        except Exception as e:
+            logger.warning(
+                "[event_layer] basic_industry bridge 构建失败 (non-fatal): %s", e
+            )
 
     # ── 概念热度（完整版 ths_index/ths_member/ths_daily 6000pt）──
 
@@ -654,22 +725,43 @@ class EventLayerProcessor:
             return
 
         if ctx.industry_heat_mode == "ths_daily_full":
-            # 完整版：先尝试 industry_cons_map（精确映射），再 fallback 到 industry 名称
-            mapped_name = ctx.industry_cons_map.get(code, "")
-            lookup_name = mapped_name or industry
-            if lookup_name and lookup_name in ctx.industry_rank_pctile:
+            # 完整版查找顺序:
+            #   1. industry_cons_map 直接映射 (index_member_all L3→L2→L1)
+            #   2. basic_industry_to_ths 桥接映射 (stock_basic.industry → ths)
+            #   3. industry 名称直接匹配 ths_index 名称
+            lookup_name = ""
+            source_detail = ""
+
+            # 策略 1: 直接映射
+            direct = ctx.industry_cons_map.get(code, "")
+            if direct and direct in ctx.industry_rank_pctile:
+                lookup_name = direct
+                source_detail = "direct"
+
+            # 策略 2: 桥接映射
+            if not lookup_name and industry:
+                bridge = ctx.basic_industry_to_ths.get(industry, "")
+                if bridge and bridge in ctx.industry_rank_pctile:
+                    lookup_name = bridge
+                    source_detail = "bridge"
+
+            # 策略 3: industry 名称直接匹配
+            if not lookup_name and industry and industry in ctx.industry_rank_pctile:
+                lookup_name = industry
+                source_detail = "name_match"
+
+            if lookup_name:
                 result.industry_heat_pctile_5d = ctx.industry_rank_pctile[lookup_name]
                 result.industry_pct_5d = ctx.industry_hist_map.get(lookup_name)
-                result.industry_heat_source = "ths_daily_full"
+                result.industry_heat_source = f"ths_daily_full_{source_detail}"
                 result.industry_name = lookup_name
             else:
-                # 股票不在映射里或行业名不匹配
                 result.industry_heat_pctile_5d = None
                 result.industry_pct_5d = None
                 result.industry_heat_source = "ths_daily_full_unmapped"
                 result.warnings.append(
                     f"[event_layer] {code}: industry_heat_unmapped: "
-                    f"industry='{industry}', mapped='{mapped_name}'"
+                    f"industry='{industry}', direct='{direct}'"
                 )
             return
 

@@ -16,7 +16,7 @@ from a_share_hot_screener.batch_runner import (
     run_batched,
 )
 from a_share_hot_screener.config import HotScreenerConfig
-from a_share_hot_screener.models import RunMetadata
+from a_share_hot_screener.models import HotStockDetail, RejectedRecord, RunMetadata
 
 import datetime as dt
 
@@ -151,10 +151,12 @@ class TestMergeMetadata:
 
 
 # ════════════════════════════════════════════════════════
-# 端到端集成测试（mock pipeline）
+# 端到端集成测试（mock pipeline）— 旧模式 (--no-global-pool)
 # ════════════════════════════════════════════════════════
 
-class TestRunBatched:
+class TestRunBatchedLocal:
+    """旧模式：每批独立评分 + CSV 合并."""
+
     @patch("a_share_hot_screener.batch_runner.Stage1HotPipeline")
     def test_splits_and_merges(self, MockPipeline, tmp_path):
         """验证 run_batched 按 batch_size 分批并合并结果."""
@@ -166,13 +168,11 @@ class TestRunBatched:
         def mock_run_side_effect():
             call_count[0] += 1
             idx = call_count[0]
-            # 获取传给 Pipeline 的 config
             mock_config = MockPipeline.call_args[0][0]
             batch_dir = mock_config.output_dir
             os.makedirs(batch_dir, exist_ok=True)
             run_date = mock_config.run_date_str
 
-            # 写一个 summary CSV
             fields = ["code", "name", "input_order"]
             with open(
                 os.path.join(batch_dir, f"{run_date}_stage1_hot_summary.csv"),
@@ -183,7 +183,6 @@ class TestRunBatched:
                 for c in mock_config.stock_codes:
                     w.writerow({"code": c, "name": f"stock_{c}", "input_order": "0"})
 
-            # 写空的 detail 和 rejected
             for suffix in ["stage1_hot_detail.csv", "stage1_hot_rejected.csv"]:
                 with open(
                     os.path.join(batch_dir, f"{run_date}_{suffix}"),
@@ -212,16 +211,15 @@ class TestRunBatched:
             stock_codes=["600519", "000858", "300750", "601318", "000001"],
             output_dir=out_dir,
             batch_size=2,
+            global_pool=False,  # 旧模式
         )
 
         metadata = run_batched(config)
 
-        # 应该分成 3 批（2+2+1）
         assert MockPipeline.call_count == 3
         assert metadata.input_pool_size == 5
         assert metadata.pass_stage1_count == 1
 
-        # 合并 summary 应有 5 行
         summary_path = os.path.join(out_dir, "2026-04-20_stage1_hot_summary.csv")
         assert os.path.exists(summary_path)
         with open(summary_path, "r", encoding="utf-8-sig") as f:
@@ -233,12 +231,10 @@ class TestRunBatched:
         """--resume 跳过已完成的批次."""
         out_dir = str(tmp_path / "output")
 
-        # 预写进度文件：batch 0 已完成
         os.makedirs(out_dir, exist_ok=True)
         batch_0_dir = os.path.join(out_dir, "batch_1")
         os.makedirs(batch_0_dir, exist_ok=True)
 
-        # 写一个假 metadata
         run_date = "2026-04-20"
         meta = RunMetadata(
             run_date=run_date,
@@ -253,17 +249,14 @@ class TestRunBatched:
         with open(meta_path, "w") as f:
             json.dump(dataclasses.asdict(meta), f, default=str)
 
-        # 写假 CSV
         for suffix in ["stage1_hot_summary.csv", "stage1_hot_detail.csv", "stage1_hot_rejected.csv"]:
             with open(os.path.join(batch_0_dir, f"{run_date}_{suffix}"), "w", encoding="utf-8-sig") as f:
                 f.write("code\n600519\n")
 
-        # 写进度
         progress = {"run_date": "2026-04-20", "completed": {"0": batch_0_dir}}
         with open(os.path.join(out_dir, ".batch_progress.json"), "w") as f:
             json.dump(progress, f)
 
-        # batch 1 正常跑
         def mock_run():
             mock_config = MockPipeline.call_args[0][0]
             bd = mock_config.output_dir
@@ -290,10 +283,152 @@ class TestRunBatched:
             output_dir=out_dir,
             batch_size=2,
             resume=True,
+            global_pool=False,  # 旧模式
         )
 
         metadata = run_batched(config)
 
-        # 只应跑 1 批（batch 0 被跳过）
         assert MockPipeline.call_count == 1
         assert metadata.input_pool_size == 3
+
+
+# ════════════════════════════════════════════════════════
+# P2: 全局池模式测试
+# ════════════════════════════════════════════════════════
+
+class TestRunBatchedGlobal:
+    """全局池模式：跨批次统一评分."""
+
+    @patch("a_share_hot_screener.batch_runner.Stage1HotPipeline")
+    def test_global_pool_collects_all_details(self, MockPipeline, tmp_path):
+        """验证全局池模式收集所有批次的 details 并统一评分."""
+        out_dir = str(tmp_path / "output")
+        run_date = "2026-04-20"
+
+        call_count = [0]
+
+        def mock_run_data_only():
+            call_count[0] += 1
+            mock_config = MockPipeline.call_args[0][0]
+            details = []
+            for i, code in enumerate(mock_config.stock_codes):
+                d = HotStockDetail(
+                    code=code,
+                    name=f"stock_{code}",
+                    input_order=i,
+                    passed_hard_filter=True,
+                    return_5d=10.0 + call_count[0],
+                    return_10d=15.0 + call_count[0],
+                    amount_avg_5d=500_000_000.0,
+                )
+                details.append(d)
+            return details, [], run_date
+
+        mock_instance = MagicMock()
+        mock_instance.run_data_only.side_effect = mock_run_data_only
+        MockPipeline.return_value = mock_instance
+
+        config = HotScreenerConfig(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 20),
+            stock_codes=["600519", "000858", "300750", "601318", "000001"],
+            output_dir=out_dir,
+            batch_size=2,
+            global_pool=True,
+            cache_dir=str(tmp_path / "cache"),  # 隔离缓存目录
+        )
+
+        metadata = run_batched(config)
+
+        # 3 批（2+2+1）
+        assert MockPipeline.call_count == 3
+        # 全局警告中应提到 global_pool_mode
+        assert any("global_pool_mode" in w for w in metadata.global_warnings)
+        # 所有 5 只都参与了评分
+        assert metadata.scoring_pool_size == 5
+        # 输出文件应存在
+        summary_path = os.path.join(out_dir, f"{run_date}_stage1_hot_summary.csv")
+        assert os.path.exists(summary_path)
+
+    @patch("a_share_hot_screener.batch_runner.Stage1HotPipeline")
+    def test_global_pool_handles_batch_failure(self, MockPipeline, tmp_path):
+        """全局池模式下某批失败不影响其他批次."""
+        out_dir = str(tmp_path / "output")
+        run_date = "2026-04-20"
+
+        call_count = [0]
+
+        def mock_run_data_only():
+            call_count[0] += 1
+            if call_count[0] == 2:
+                raise RuntimeError("模拟批次失败")
+            mock_config = MockPipeline.call_args[0][0]
+            details = [
+                HotStockDetail(
+                    code=c, name=f"stock_{c}", input_order=i,
+                    passed_hard_filter=True,
+                    return_5d=10.0, return_10d=15.0,
+                    amount_avg_5d=500_000_000.0,
+                )
+                for i, c in enumerate(mock_config.stock_codes)
+            ]
+            return details, [], run_date
+
+        mock_instance = MagicMock()
+        mock_instance.run_data_only.side_effect = mock_run_data_only
+        MockPipeline.return_value = mock_instance
+
+        config = HotScreenerConfig(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 20),
+            stock_codes=["600519", "000858", "300750", "601318", "000001"],
+            output_dir=out_dir,
+            batch_size=2,
+            global_pool=True,
+            cache_dir=str(tmp_path / "cache"),
+        )
+
+        metadata = run_batched(config)
+
+        # 3 批中第 2 批失败，scoring_pool 只有 3 只（batch 1: 2 + batch 3: 1）
+        assert metadata.scoring_pool_size == 3
+
+    @patch("a_share_hot_screener.batch_runner.Stage1HotPipeline")
+    def test_global_pool_uniform_percentile(self, MockPipeline, tmp_path):
+        """验证全局池模式下所有股票在同一个 pool 中计算百分位."""
+        out_dir = str(tmp_path / "output")
+        run_date = "2026-04-20"
+
+        def mock_run_data_only():
+            mock_config = MockPipeline.call_args[0][0]
+            details = [
+                HotStockDetail(
+                    code=c, name=f"s_{c}", input_order=i,
+                    passed_hard_filter=True,
+                    return_5d=float(i * 5),
+                    return_10d=float(i * 8),
+                    amount_avg_5d=200_000_000.0,
+                )
+                for i, c in enumerate(mock_config.stock_codes)
+            ]
+            return details, [], run_date
+
+        mock_instance = MagicMock()
+        mock_instance.run_data_only.side_effect = mock_run_data_only
+        MockPipeline.return_value = mock_instance
+
+        codes = [f"{600000 + i:06d}" for i in range(20)]
+        config = HotScreenerConfig(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 20),
+            stock_codes=codes,
+            output_dir=out_dir,
+            batch_size=5,
+            global_pool=True,
+            cache_dir=str(tmp_path / "cache"),
+        )
+
+        metadata = run_batched(config)
+
+        # 4 批 × 5 只 = 20 只全部在同一个 pool
+        assert metadata.scoring_pool_size == 20

@@ -264,13 +264,21 @@ class TestRiskControlScore:
             abs_distance_to_ma10=0.02,     # RC3: abs=2% <= G=2% → 1.0（S10阈值）
             upper_shadow_count_5d=0,       # RC4: 无上影线 → 1.0
             return_3d=2.0,                 # RC5: 2.0/10=0.2 < G=0.8 → 1.0
+            flags={                        # RC6~RC10: Session 22 新增
+                "pledge_ratio_latest": 0.0,                      # RC6 → 1.0
+                "restricted_shares_unlock_ratio_20d": 0.0,       # RC7 → 1.0
+                "shareholder_net_reduction_ratio_3m": -5.0,      # RC8 → 1.0
+                "net_holder_reduction_ratio_30d": -0.5,          # RC9 → 1.0
+                "short_sell_ratio_change_5d": 0.0,               # RC10 → 1.0
+                "is_margin_eligible": True,                      # RC10 applicable
+            },
         )
         pool = _full_pool()
         axis = compute_risk_control_score(detail, pool)
         assert axis.score is not None
         assert 0.0 <= axis.score <= 1.0
         assert axis.coverage == pytest.approx(1.0)
-        assert len(axis.items) == 5
+        assert len(axis.items) == 10
         assert axis.axis_name == "risk_control_score"
 
     def test_rc1_not_limit_board(self):
@@ -474,7 +482,7 @@ class TestComputeFlags:
         detail = self._make_full_detail()
         flags = compute_flags(detail, enable_lhb_module=True,
                               enable_concept_heat_module=True)
-        assert len(flags) == 20
+        assert len(flags) == 26  # 20 original + 6 Session 22 (moneyflow/holdertrade/margin/sector)
 
     def test_lhb_disabled(self):
         """enable_lhb_module=False → lhb_count_20d=None."""

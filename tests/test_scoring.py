@@ -526,13 +526,14 @@ class TestHotThemeScore:
             consec_up_days=3,                 # S11: HT4 连续上涨天数
             industry_heat_pctile_5d=0.85,
             industry_heat_source="hist_em_5d",
+            flags={"sector_momentum_signal": "steady_strong"},  # HT7
         )
         pool = self._make_full_pool()
         axis = compute_hot_theme_score(detail, pool)
         assert axis.score is not None
         assert 0 <= axis.score <= 1.0
         assert axis.coverage == pytest.approx(1.0)
-        assert len(axis.items) == 5
+        assert len(axis.items) == 6  # HT1-HT5 + HT7 (HT6 off)
         assert axis.axis_name == "hot_theme_score"
 
     def test_industry_heat_missing_reduces_coverage(self):
@@ -630,40 +631,40 @@ class TestHotThemeScore:
     # ── HT6: 概念板块热度（Session 16 新增）──────────────────
 
     def test_ht6_included_when_concept_available(self):
-        """HT6: 概念模块可用时纳入评分（共 6 项）."""
+        """HT6: 概念模块可用时纳入评分（共 7 项：HT1-HT6 + HT7）."""
         from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score
         detail = _make_detail(
             return_5d=8.0, return_10d=12.0,
             big_up_count_10d=2, consec_up_days=3,
             industry_heat_pctile_5d=0.8,
+            flags={"sector_momentum_signal": "neutral"},
         )
         detail.advanced_concept_module_available = True
         detail.concept_heat_pctile_5d = 0.85
         detail.concept_heat_source = "concept_spot_em_degraded"
         pool = self._make_full_pool()
         axis = compute_hot_theme_score(detail, pool)
-        assert len(axis.items) == 6
+        assert len(axis.items) == 7  # HT1-HT7
         ht6 = next(i for i in axis.items if i.name == "concept_heat_pctile_5d")
         assert ht6.is_data_available is True
         assert ht6.weight == 7.0
-        # 85百分位 → 0.85*100=85 > H=90? No, 85 < 90, 在 T=75 和 H=90 之间
-        # 三段下限型: (85-55)/(90-55) = 30/35 = 0.857… → 分数应较高
         assert ht6.subscore is not None
         assert ht6.subscore > 0.5
 
     def test_ht6_excluded_when_concept_unavailable(self):
-        """HT6: 概念模块不可用时不纳入评分（共 5 项）."""
+        """HT6: 概念模块不可用时不纳入评分（共 6 项：HT1-HT5 + HT7）."""
         from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score
         detail = _make_detail(
             return_5d=8.0, return_10d=12.0,
             big_up_count_10d=2, consec_up_days=3,
             industry_heat_pctile_5d=0.8,
+            flags={"sector_momentum_signal": "neutral"},
         )
         detail.advanced_concept_module_available = False
         detail.concept_heat_pctile_5d = None
         pool = self._make_full_pool()
         axis = compute_hot_theme_score(detail, pool)
-        assert len(axis.items) == 5
+        assert len(axis.items) == 6  # HT1-HT5 + HT7 (no HT6)
         assert all(i.name != "concept_heat_pctile_5d" for i in axis.items)
 
     def test_ht6_high_concept_heat_score(self):
@@ -699,22 +700,23 @@ class TestHotThemeScore:
         assert ht6.subscore == pytest.approx(0.0)
 
     def test_ht6_coverage_with_concept(self):
-        """概念模块可用时 coverage 应反映 6 个指标."""
+        """概念模块可用时 coverage 应反映 7 个指标."""
         from a_share_hot_screener.scorers.hot_theme import compute_hot_theme_score
         detail = _make_detail(
             return_5d=8.0, return_10d=12.0,
             big_up_count_10d=2, consec_up_days=3,
             industry_heat_pctile_5d=0.8,
+            flags={"sector_momentum_signal": "steady_strong"},
         )
         detail.advanced_concept_module_available = True
         detail.concept_heat_pctile_5d = 0.75
         pool = self._make_full_pool()
         axis = compute_hot_theme_score(detail, pool)
-        # 6 个指标全有数据，coverage 应为 1.0
+        # 7 个指标全有数据，coverage 应为 1.0
         assert axis.coverage == pytest.approx(1.0)
-        # 总权重: 8+6+8+6+7+7=42
+        # 总权重: 8+6+8+6+7+7+5=47
         total_weight = sum(i.weight for i in axis.items)
-        assert total_weight == pytest.approx(42.0)
+        assert total_weight == pytest.approx(47.0)
 
 
 # ════════════════════════════════════════════════════════
@@ -740,13 +742,18 @@ class TestTrendFlowScore:
             volume_ratio_20d=1.8,
             clv_latest=0.7,
             amount_ratio_5d_to_20d=1.3,
+            flags={                         # TF6/TF7: Session 22 新增
+                "net_main_inflow_ratio_5d": 5.0,
+                "margin_buy_net_ratio_5d": 2.0,
+                "is_margin_eligible": True,
+            },
         )
         pool = self._make_full_pool()
         axis = compute_trend_flow_score(detail, pool)
         assert axis.score is not None
         assert 0 <= axis.score <= 1.0
         assert axis.coverage == pytest.approx(1.0)
-        assert len(axis.items) == 5
+        assert len(axis.items) == 7
         assert axis.axis_name == "trend_flow_score"
 
     def test_tf1_close_position_three_seg(self):

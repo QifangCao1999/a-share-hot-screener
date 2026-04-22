@@ -122,3 +122,68 @@ class TestCacheVersioning:
         # 共剩 1 个文件
         json_files = list((tmp_path / "cache").rglob("*.json"))
         assert len(json_files) == 1
+
+
+class TestCacheMaintenance:
+    """P8 缓存自动维护测试."""
+
+    def test_purge_expired(self, tmp_path):
+        """清理已过期文件."""
+        c = LocalCache(str(tmp_path / "cache"))
+        c.put("ns", "fresh", "alive", ttl=3600)
+        c.put("ns", "stale", "dead", ttl=1)
+        time.sleep(1.1)
+
+        removed = c.purge_expired()
+        assert removed == 1
+        # fresh 还在
+        assert c.get("ns", "fresh") == "alive"
+        # stale 已被清理
+        json_files = list((tmp_path / "cache").rglob("*.json"))
+        assert len(json_files) == 1
+
+    def test_purge_expired_all_fresh(self, tmp_path):
+        """所有缓存都未过期时不删除."""
+        c = LocalCache(str(tmp_path / "cache"))
+        c.put("ns", "a", 1, ttl=3600)
+        c.put("ns", "b", 2, ttl=3600)
+
+        removed = c.purge_expired()
+        assert removed == 0
+
+    def test_stats_empty(self, tmp_path):
+        """空缓存统计."""
+        c = LocalCache(str(tmp_path / "cache"))
+        st = c.stats()
+        assert st["file_count"] == 0
+        assert st["size_mb"] == 0.0
+        assert st["expired_count"] == 0
+        assert st["schema_version"] == CACHE_SCHEMA_VERSION
+        assert st["namespaces"] == {}
+
+    def test_stats_with_data(self, tmp_path):
+        """有数据时的统计."""
+        c = LocalCache(str(tmp_path / "cache"))
+        c.put("prices", "600519", {"close": 1800}, ttl=3600)
+        c.put("prices", "000858", {"close": 150}, ttl=3600)
+        c.put("basic", "all", [1, 2, 3], ttl=3600)
+
+        st = c.stats()
+        assert st["file_count"] == 3
+        assert st["size_mb"] >= 0  # 小文件四舍五入后可能为 0.0
+        assert st["expired_count"] == 0
+        assert "prices" in st["namespaces"]
+        assert st["namespaces"]["prices"]["file_count"] == 2
+        assert "basic" in st["namespaces"]
+        assert st["namespaces"]["basic"]["file_count"] == 1
+
+    def test_stats_expired_count(self, tmp_path):
+        """统计已过期文件数量."""
+        c = LocalCache(str(tmp_path / "cache"))
+        c.put("ns", "fresh", "alive", ttl=3600)
+        c.put("ns", "stale", "dead", ttl=1)
+        time.sleep(1.1)
+
+        st = c.stats()
+        assert st["file_count"] == 2
+        assert st["expired_count"] == 1

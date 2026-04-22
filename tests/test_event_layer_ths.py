@@ -358,7 +358,7 @@ class TestEventLayerProcessorIndustryHeatFull:
         )
         assert result.industry_heat_pctile_5d == 0.625
         assert result.industry_pct_5d == 2.0
-        assert result.industry_heat_source == "ths_daily_full"
+        assert result.industry_heat_source == "ths_daily_full_direct"
         assert result.industry_name == "白酒"
 
     def test_full_mode_uses_cons_map_over_industry_param(self):
@@ -391,7 +391,7 @@ class TestEventLayerProcessorIndustryHeatFull:
             trade_dates_10d=[], trade_dates_3d=[], trade_dates_20d=[],
         )
         assert result.industry_heat_pctile_5d == 0.625
-        assert result.industry_heat_source == "ths_daily_full"
+        assert result.industry_heat_source == "ths_daily_full_name_match"
 
     def test_full_mode_unmapped(self):
         """stock 的行业名在 rank_pctile 中找不到。"""
@@ -408,6 +408,25 @@ class TestEventLayerProcessorIndustryHeatFull:
         )
         assert result.industry_heat_pctile_5d is None
         assert result.industry_heat_source == "ths_daily_full_unmapped"
+
+    def test_full_mode_bridge_mapping(self):
+        """桥接映射: stock 不在 cons_map 但 basic.industry 有桥接。"""
+        ctx = _make_ctx_full(
+            industry_heat_mode="ths_daily_full",
+            industry_rank_pctile={"半导体": 0.875},
+            industry_hist_map={"半导体": 10.0},
+            industry_cons_map={},  # 该股票不在直接映射中
+        )
+        # 手动设置桥接映射: "元器件" → "半导体"
+        ctx.basic_industry_to_ths["元器件"] = "半导体"
+        proc = EventLayerProcessor(ctx=ctx, tushare_client=MagicMock(), cache=None)
+        result = proc.process(
+            code="002436", industry="元器件", run_date=dt.date(2026, 4, 18),
+            trade_dates_10d=[], trade_dates_3d=[], trade_dates_20d=[],
+        )
+        assert result.industry_heat_pctile_5d == 0.875
+        assert result.industry_heat_source == "ths_daily_full_bridge"
+        assert result.industry_name == "半导体"
 
     def test_degraded_mode_unchanged(self):
         """降级模式行为不变。"""
@@ -583,7 +602,7 @@ class TestEventLayerIntegration:
             trade_dates_20d=trade_dates,
         )
         assert result.industry_heat_pctile_5d is not None
-        assert result.industry_heat_source == "ths_daily_full"
+        assert result.industry_heat_source.startswith("ths_daily_full")
         # 茅台在华为概念里（通过 ths_member 查询）
         assert result.concept_heat_source in ("ths_daily_full", "ths_daily_full_no_concept")
 

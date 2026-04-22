@@ -1,14 +1,18 @@
-"""trend_flow_score 计算模块（Session 5; Session 8 P1 权重/阈值/B2对齐提示词）.
+"""trend_flow_score 计算模块（Session 5; Session 8 P1; Session 22 新增TF6/TF7）.
 
 趋势与资金流向评分轴，衡量股票当前的量价结构与资金流入态势。
 
 ──────────────────────────────────────────────────────
-指标列表（5 项）：
+指标列表（7 项）：
   TF1  20日区间收盘位置                weight=7   三段下限型（L=0.55,T=0.75,H=0.95）
   TF2  均线多头排列程度                 weight=6   离散型（close>ma5, ma5>ma10, ma10>ma20 三条件）
-  TF3  最新成交量/20日均量（量比）       weight=6   三段下限型（L=1.1,T=1.8,H=3.0）clamp=5
+  TF3  最新成交量/20日均量（量比）       weight=6   三段下限型（L=0.8,T=1.8,H=3.0）clamp=5
   TF4  最新收盘在日内位置（CLV）         weight=5   三段下限型（L=0.40,T=0.70,H=0.90）
   TF5  近5日均成交额/近20日均成交额      weight=6   三段下限型（L=1.0,T=1.5,H=2.5）clamp=4
+  TF6  近5日主力净流入占比(%)         weight=6   三段下限型（L=-5,T=3,H=10）
+       Session 22 新增：从 flags["net_main_inflow_ratio_5d"] 读取
+  TF7  近5日融资净买入占比(%)         weight=4   三段下限型（L=-2,T=1,H=5）
+       Session 22 新增：从 flags["margin_buy_net_ratio_5d"] 读取；非两融标的 is_applicable=False
 ──────────────────────────────────────────────────────
 """
 
@@ -99,6 +103,41 @@ def compute_trend_flow_score(
         note=(
             f"近5日均成交额/近20日均成交额；raw={ar}；clamp_at_4.0；"
             "三段型L=1.0/T=1.5/H=2.5；"
+        ),
+    ))
+
+    # ── TF6: 近5日主力净流入占比（三段下限型：L=-5,T=3,H=10）weight=6 ────
+    # Session 22 新增：主力资金(大单+特大单)净流入占总成交额比例
+    main_inflow = detail.flags.get("net_main_inflow_ratio_5d")
+    axis.items.append(score_lower_bound(
+        name="net_main_inflow_ratio_5d",
+        value=main_inflow,
+        bad_threshold=-5.0,
+        mid_threshold=3.0,
+        good_threshold=10.0,
+        weight=6.0,
+        note=(
+            f"近5日主力净流入占总成交额比(%)；raw={main_inflow}；"
+            "三段型L=-5%/T=3%/H=10%；来源flags[net_main_inflow_ratio_5d]"
+        ),
+    ))
+
+    # ── TF7: 近5日融资净买入占比（三段下限型：L=-2,T=1,H=5）weight=4 ────
+    # Session 22 新增：仅两融标的适用，非两融 is_applicable=False
+    margin_ratio = detail.flags.get("margin_buy_net_ratio_5d")
+    is_margin = detail.flags.get("is_margin_eligible", False)
+    axis.items.append(score_lower_bound(
+        name="margin_buy_net_ratio_5d",
+        value=margin_ratio,
+        bad_threshold=-2.0,
+        mid_threshold=1.0,
+        good_threshold=5.0,
+        weight=4.0,
+        is_applicable=bool(is_margin),
+        note=(
+            f"近5日融资净买入占成交额(%)；raw={margin_ratio}；"
+            f"is_margin={is_margin}；"
+            "三段型L=-2%/T=1%/H=5%；非两融标的is_applicable=False"
         ),
     ))
 

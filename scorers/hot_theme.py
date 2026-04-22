@@ -3,7 +3,7 @@
 热点题材强度评分轴，衡量股票在当前热点环境中的参与程度与强度。
 
 ──────────────────────────────────────────────────────
-指标列表（6 项）：
+指标列表（7 项）：
   HT1  近5日收益率横截面百分位       weight=8   百分位→三段下限型（L=60,T=80,H=95）
   HT2  近10日收益率横截面百分位      weight=6   百分位→三段下限型（L=60,T=80,H=95）
   HT3  近10日大涨天数（涨幅>5%）     weight=8   离散型 0→0, 1→0.40, 2→0.70, 3→0.90, ≥4→1.0
@@ -13,6 +13,9 @@
   HT5  所属行业近5日强度百分位       weight=7   百分位→三段下限型（L=55,T=75,H=90）
   HT6  所属概念板块热度百分位       weight=7   百分位→三段下限型（L=55,T=75,H=90）
        仅在 enable_concept_heat_module=True 且概念模块可用时纳入评分
+  HT7  板块轮动动量信号              weight=5   离散型（Session 22）
+       rotate_in→1.0, steady_strong→0.85, neutral→0.50, rotate_out→0.15, steady_weak→0.0
+       从 flags["sector_momentum_signal"] 读取；未启用时 is_applicable=False
 
 #2 小池百分位修正：
   pool_size >= 30:  正常百分位
@@ -306,6 +309,36 @@ def compute_hot_theme_score(
                 f"source={detail.concept_heat_source or 'none'}"
             ),
         ))
+
+    # ── HT7: 板块轮动动量信号（离散型）weight=5 ────
+    # Session 22 新增：rotate_in=1.0, steady_strong=0.85, neutral=0.50,
+    #                 rotate_out=0.15, steady_weak=0.0
+    _HT7_MOMENTUM_MAP = {
+        "rotate_in": 1.0,
+        "steady_strong": 0.85,
+        "neutral": 0.50,
+        "rotate_out": 0.15,
+        "steady_weak": 0.0,
+    }
+    sector_momentum = detail.flags.get("sector_momentum_signal")
+    ht7_applicable = sector_momentum is not None and sector_momentum != "neutral"
+    ht7_item = ScoreItem(
+        name="sector_momentum_signal",
+        weight=5.0,
+        is_applicable=sector_momentum is not None,
+        note=(
+            f"板块轮动动量信号；raw={sector_momentum}；"
+            "rotate_in=1.0/steady_strong=0.85/neutral=0.50/"
+            "rotate_out=0.15/steady_weak=0.0"
+        ),
+    )
+    if sector_momentum is not None:
+        ht7_item.raw_value = sector_momentum
+        ht7_item.is_data_available = True
+        ht7_item.subscore = _HT7_MOMENTUM_MAP.get(sector_momentum, 0.50)
+    else:
+        ht7_item.is_data_available = False
+    axis.items.append(ht7_item)
 
     axis.compute()
     return axis

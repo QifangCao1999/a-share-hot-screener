@@ -1,9 +1,9 @@
-"""risk_control_score 计算模块（Session 6; Session 8 P1 对齐提示词; Session 10 重校准）.
+"""risk_control_score 计算模块（Session 6; Session 8 P1 对齐提示词; Session 10 重校准; Session 22 新增RC6/7/8）.
 
 风险控制评分轴，高分=低风险。
 
 ──────────────────────────────────────────────────────
-指标列表（5 项）：
+指标列表（10 项）：
   RC1  近5日一字板次数             weight=4  离散型（0→1.0, 1→0.50, 2→0.20, ≥3→0.0）
        Session 10 改动：从"最新1日一字板"扩展为"近5日一字板次数"，增强区分度
   RC2  近5日均振幅/涨跌停幅度     weight=3  三段上限型（G=0.5,T=1.0,B=1.8）clamp=2.0
@@ -11,6 +11,16 @@
        Session 10 改动：从 G=3%/T=10%/B=20% 收紧为 G=2%/T=6%/B=15%
   RC4  近5日长上影/炸板proxy次数  weight=2  离散型（0=1.0,1=0.70,2=0.40,≥3=0.0）
   RC5  近3日累计涨幅/涨跌停幅度   weight=2  三段上限型（G=0.8,T=1.8,B=3.5）clamp=[-4,4]
+  RC6  质押比例(%)               weight=2  三段上限型（G=5,T=20,B=40）
+       Session 22 新增：从 flags["pledge_ratio_latest"] 读取
+  RC7  未来20日解禁占比(%)        weight=2  三段上限型（G=1,T=5,B=15）
+       Session 22 新增：从 flags["restricted_shares_unlock_ratio_20d"] 读取
+  RC8  近3月股东人数增幅(%)       weight=1  三段上限型（G=0,T=10,B=25）
+       Session 22 新增：从 flags["shareholder_net_reduction_ratio_3m"] 读取
+  RC9  近30日股东净减持占流通比(%) weight=3  三段上限型（G=0,T=0.5,B=2）
+       Session 22 新增：从 flags["net_holder_reduction_ratio_30d"] 读取
+  RC10 近5日融券余额变化率(%)   weight=1  三段上限型（G=10,T=50,B=100）
+       Session 22 新增：从 flags["short_sell_ratio_change_5d"] 读取；非两融 is_applicable=False
 ──────────────────────────────────────────────────────
 """
 
@@ -128,6 +138,92 @@ def compute_risk_control_score(
             f"近3日涨幅/涨跌停幅度({limit_pct}%)；"
             f"raw_return_3d={r3d}；norm={norm_r3d}；"
             "三段型G=0.8/T=1.8/B=3.5"
+        ),
+    ))
+
+    # ── RC6: 质押比例（三段上限型：G=5%,T=20%,B=40%）weight=2 ────
+    # Session 22 新增：高质押 → 大股东融资压力大，有被强平风险
+    pledge_ratio = detail.flags.get("pledge_ratio_latest")
+    axis.items.append(score_upper_bound(
+        name="pledge_ratio_pct",
+        value=pledge_ratio,
+        good_threshold=5.0,
+        mid_threshold=20.0,
+        bad_threshold=40.0,
+        weight=2.0,
+        note=(
+            f"质押占总股本比例(%)；raw={pledge_ratio}；"
+            "三段型G=5%/T=20%/B=40%；来源flags[pledge_ratio_latest]"
+        ),
+    ))
+
+    # ── RC7: 未来20日限售解禁占比（三段上限型：G=1%,T=5%,B=15%）weight=2 ────
+    # Session 22 新增：大量解禁 → 抛压风险
+    unlock_ratio = detail.flags.get("restricted_shares_unlock_ratio_20d")
+    axis.items.append(score_upper_bound(
+        name="unlock_ratio_20d",
+        value=unlock_ratio,
+        good_threshold=1.0,
+        mid_threshold=5.0,
+        bad_threshold=15.0,
+        weight=2.0,
+        note=(
+            f"未来20日解禁占流通盘比例(%)；raw={unlock_ratio}；"
+            "三段型G=1%/T=5%/B=15%；来源flags[restricted_shares_unlock_ratio_20d]"
+        ),
+    ))
+
+    # ── RC8: 近3月股东人数增幅（三段上限型：G=0%,T=10%,B=25%）weight=1 ────
+    # Session 22 新增：人数增加=筹码分散=bearish；人数减少=集中=bullish
+    # 正值=增加（差），负值=减少（好）
+    holder_change = detail.flags.get("shareholder_net_reduction_ratio_3m")
+    axis.items.append(score_upper_bound(
+        name="shareholder_increase_3m",
+        value=holder_change,
+        good_threshold=0.0,
+        mid_threshold=10.0,
+        bad_threshold=25.0,
+        weight=1.0,
+        note=(
+            f"近3月股东人数变化率(%)；raw={holder_change}；"
+            "正值=人数增加=筹码分散；负值=人数减少=集中；"
+            "三段型G=0%/T=10%/B=25%；来源flags[shareholder_net_reduction_ratio_3m]"
+        ),
+    ))
+
+    # ── RC9: 近30日股东净减持占流通比（三段上限型：G=0%,T=0.5%,B=2%）weight=3 ────
+    # Session 22 新增：大股东/高管集中减持 = 最直接的跑路预警
+    holder_trade = detail.flags.get("net_holder_reduction_ratio_30d")
+    axis.items.append(score_upper_bound(
+        name="holder_trade_reduction_30d",
+        value=holder_trade,
+        good_threshold=0.0,
+        mid_threshold=0.5,
+        bad_threshold=2.0,
+        weight=3.0,
+        note=(
+            f"近30日股东净减持占流通比(%)；raw={holder_trade}；"
+            "正值=净减持；负值=净增持；"
+            "三段型G=0%/T=0.5%/B=2%；来源flags[net_holder_reduction_ratio_30d]"
+        ),
+    ))
+
+    # ── RC10: 近5日融券余额变化率（三段上限型：G=10%,T=50%,B=100%）weight=1 ────
+    # Session 22 新增：融券余额暴增 = 做空压力；仅两融标的适用
+    short_sell_change = detail.flags.get("short_sell_ratio_change_5d")
+    is_margin = detail.flags.get("is_margin_eligible", False)
+    axis.items.append(score_upper_bound(
+        name="short_sell_pressure_5d",
+        value=short_sell_change,
+        good_threshold=10.0,
+        mid_threshold=50.0,
+        bad_threshold=100.0,
+        weight=1.0,
+        is_applicable=bool(is_margin),
+        note=(
+            f"近5日融券余额变化率(%)；raw={short_sell_change}；"
+            f"is_margin={is_margin}；"
+            "三段型G=10%/T=50%/B=100%；非两融标的is_applicable=False"
         ),
     ))
 

@@ -138,6 +138,86 @@ class LocalCache:
                 total += f.stat().st_size
         return total / (1024 * 1024)
 
+    def purge_expired(self) -> int:
+        """删除已过 TTL 的缓存文件（P8 缓存自动维护）.
+
+        与 purge_stale（删除版本不匹配）不同，此方法删除当前版本中已过期的文件。
+
+        Returns:
+            删除的文件数量
+        """
+        removed = 0
+        now = time.time()
+        for f in self.cache_dir.rglob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                expire_at = data.get("expire_at", 0)
+                if now > expire_at:
+                    f.unlink()
+                    removed += 1
+            except Exception:
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
+    def stats(self) -> dict:
+        """返回缓存统计信息（P8 缓存自动维护）.
+
+        Returns:
+            dict with keys:
+                file_count:     缓存文件总数
+                size_mb:        总大小（MB）
+                namespaces:     {ns: {file_count, size_mb}}
+                hit_rate:       命中率（float 或 None）
+                schema_version: 当前 schema 版本
+                expired_count:  已过期但仍在磁盘的文件数
+        """
+        total_files = 0
+        total_bytes = 0
+        expired = 0
+        now = time.time()
+        ns_stats: dict = {}
+
+        for f in self.cache_dir.rglob("*.json"):
+            if not f.is_file():
+                continue
+            total_files += 1
+            fsize = f.stat().st_size
+            total_bytes += fsize
+
+            try:
+                rel = f.relative_to(self.cache_dir)
+                ns = rel.parts[0] if len(rel.parts) > 1 else "_root"
+            except ValueError:
+                ns = "_unknown"
+
+            if ns not in ns_stats:
+                ns_stats[ns] = {"file_count": 0, "size_mb": 0.0}
+            ns_stats[ns]["file_count"] += 1
+            ns_stats[ns]["size_mb"] += fsize / (1024 * 1024)
+
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if now > data.get("expire_at", 0):
+                    expired += 1
+            except Exception:
+                expired += 1
+
+        for ns in ns_stats:
+            ns_stats[ns]["size_mb"] = round(ns_stats[ns]["size_mb"], 2)
+
+        return {
+            "file_count": total_files,
+            "size_mb": round(total_bytes / (1024 * 1024), 2),
+            "namespaces": ns_stats,
+            "hit_rate": self.get_hit_rate(),
+            "schema_version": self._schema_version,
+            "expired_count": expired,
+        }
+
     # ── 内部 ─────────────────────────────────────────────
 
     def purge_stale(self) -> int:

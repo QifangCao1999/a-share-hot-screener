@@ -714,6 +714,138 @@ class TushareClient:
         return df
 
     # ═══════════════════════════════════════════════════════
+    # 个股资金流向 (2000pt) — Session 22 新增
+    # ═══════════════════════════════════════════════════════
+
+    def get_moneyflow(
+        self,
+        ts_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        use_cache: bool = True,
+        cache_ttl: int = 86400,
+    ) -> Optional[pd.DataFrame]:
+        """获取个股资金流向.
+
+        Returns:
+            DataFrame: ts_code, trade_date, buy_sm_amount(万元),
+                       sell_sm_amount, buy_md_amount, sell_md_amount,
+                       buy_lg_amount, sell_lg_amount, buy_elg_amount,
+                       sell_elg_amount, net_mf_amount
+        """
+        cache_key = f"moneyflow_{ts_code}_{start_date}_{end_date}"
+        if use_cache and self.cache:
+            cached = self.cache.get("tushare_moneyflow", cache_key, ttl=cache_ttl)
+            if cached is not None:
+                try:
+                    return pd.DataFrame(cached)
+                except Exception:
+                    pass
+
+        kwargs: Dict[str, Any] = {"ts_code": ts_code}
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        df = self._call("moneyflow", label=f"moneyflow({ts_code})", **kwargs)
+        if df is not None and not df.empty and use_cache and self.cache:
+            self.cache.put("tushare_moneyflow", cache_key, df.to_dict("records"), ttl=cache_ttl)
+
+        return df
+
+    # ═══════════════════════════════════════════════════════
+    # 股东增减持 (2000pt) — Session 22 新增
+    # ═══════════════════════════════════════════════════════
+
+    def get_stk_holdertrade(
+        self,
+        ts_code: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        use_cache: bool = True,
+        cache_ttl: int = 86400,
+    ) -> Optional[pd.DataFrame]:
+        """获取重要股东/高管增减持公告.
+
+        Returns:
+            DataFrame: ts_code, ann_date, holder_name, holder_type,
+                       in_de(IN/DE), change_vol(万股), change_ratio(占流通%),
+                       after_share, after_ratio, avg_price, total_share,
+                       begin_date, close_date
+        """
+        cache_key = f"holdertrade_{ts_code}_{start_date}_{end_date}"
+        if use_cache and self.cache:
+            cached = self.cache.get("tushare_holdertrade", cache_key, ttl=cache_ttl)
+            if cached is not None:
+                try:
+                    return pd.DataFrame(cached)
+                except Exception:
+                    pass
+
+        kwargs: Dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        df = self._call("stk_holdertrade", label=f"stk_holdertrade({ts_code})", **kwargs)
+        if df is not None and not df.empty and use_cache and self.cache:
+            self.cache.put("tushare_holdertrade", cache_key, df.to_dict("records"), ttl=cache_ttl)
+
+        return df
+
+    # ═══════════════════════════════════════════════════════
+    # 融资融券明细 (2000pt) — Session 22 新增
+    # ═══════════════════════════════════════════════════════
+
+    def get_margin_detail(
+        self,
+        ts_code: str = "",
+        trade_date: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        use_cache: bool = True,
+        cache_ttl: int = 86400,
+    ) -> Optional[pd.DataFrame]:
+        """获取个股融资融券明细.
+
+        Returns:
+            DataFrame: ts_code, trade_date, rzye(融资余额), rqye(融券余额),
+                       rzmre(融资买入额), rzche(融资偿还额),
+                       rqmcl(融券卖出量), rqchl(融券偿还量)
+        """
+        if trade_date:
+            cache_key = f"margin_{ts_code}_{trade_date}"
+        else:
+            cache_key = f"margin_{ts_code}_{start_date}_{end_date}"
+        if use_cache and self.cache:
+            cached = self.cache.get("tushare_margin", cache_key, ttl=cache_ttl)
+            if cached is not None:
+                try:
+                    return pd.DataFrame(cached)
+                except Exception:
+                    pass
+
+        kwargs: Dict[str, Any] = {}
+        if ts_code:
+            kwargs["ts_code"] = ts_code
+        if trade_date:
+            kwargs["trade_date"] = trade_date
+        if start_date:
+            kwargs["start_date"] = start_date
+        if end_date:
+            kwargs["end_date"] = end_date
+
+        df = self._call("margin_detail", label=f"margin_detail({ts_code})", **kwargs)
+        if df is not None and not df.empty and use_cache and self.cache:
+            self.cache.put("tushare_margin", cache_key, df.to_dict("records"), ttl=cache_ttl)
+
+        return df
+
+    # ═══════════════════════════════════════════════════════
     # 批量预加载（用于并发处理前的串行预热缓存）
     # ═══════════════════════════════════════════════════════
 
@@ -800,5 +932,70 @@ class TushareClient:
         logger.info(
             "[prefetch] 预加载完成: %d 次 API 调用 (pledge=%d, float=%d, holdnum=%d) | %.1fs",
             total_calls, stats['pledge'], stats['float'], stats['holdnum'], elapsed,
+        )
+        return stats
+
+    def prefetch_flow_data(
+        self,
+        ts_codes: List[str],
+        start_date: str = "",
+        end_date: str = "",
+        max_workers: int = 5,
+    ) -> Dict[str, int]:
+        """Session 22: 并发预加载资金流向/股东增减持/融资融券数据到缓存."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        stats = {'moneyflow': 0, 'holdertrade': 0, 'margin': 0}
+        if not ts_codes:
+            return stats
+
+        tasks: List[tuple] = []
+        for ts_code in ts_codes:
+            mf_key = f"moneyflow_{ts_code}_{start_date}_{end_date}"
+            if not (self.cache and self.cache.get("tushare_moneyflow", mf_key, ttl=86400) is not None):
+                tasks.append((ts_code, 'moneyflow'))
+            ht_key = f"holdertrade_{ts_code}_{start_date}_{end_date}"
+            if not (self.cache and self.cache.get("tushare_holdertrade", ht_key, ttl=86400) is not None):
+                tasks.append((ts_code, 'holdertrade'))
+            mg_key = f"margin_{ts_code}_{start_date}_{end_date}"
+            if not (self.cache and self.cache.get("tushare_margin", mg_key, ttl=86400) is not None):
+                tasks.append((ts_code, 'margin'))
+
+        if not tasks:
+            logger.info("[prefetch_flow] 全部已缓存，跳过 (%d 只)", len(ts_codes))
+            return stats
+
+        logger.info(
+            "[prefetch_flow] 开始预加载: %d 只, %d 个待拉取 (%d 并发)",
+            len(ts_codes), len(tasks), max_workers,
+        )
+        t0 = time.time()
+        _lock = threading.Lock()
+
+        def _fetch(tc: str, api_type: str) -> str:
+            if api_type == 'moneyflow':
+                self.get_moneyflow(tc, start_date=start_date, end_date=end_date)
+            elif api_type == 'holdertrade':
+                self.get_stk_holdertrade(tc, start_date=start_date, end_date=end_date)
+            elif api_type == 'margin':
+                self.get_margin_detail(tc, start_date=start_date, end_date=end_date)
+            return api_type
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(_fetch, tc, at): (tc, at) for tc, at in tasks}
+            for fut in as_completed(futs):
+                try:
+                    at = fut.result()
+                    with _lock:
+                        stats[at] = stats.get(at, 0) + 1
+                except Exception as e:
+                    tc, at = futs[fut]
+                    logger.warning("[prefetch_flow] %s(%s) 失败: %s", at, tc, e)
+
+        elapsed = time.time() - t0
+        total = sum(stats.values())
+        logger.info(
+            "[prefetch_flow] 完成: %d 次 (mf=%d, ht=%d, mg=%d) | %.1fs",
+            total, stats['moneyflow'], stats['holdertrade'], stats['margin'], elapsed,
         )
         return stats

@@ -339,14 +339,14 @@ class TestHT4ConsecUpDays:
 class TestH6AmountTolerance:
 
     def test_default_tolerance_5pct(self):
-        """默认容差5%: min_amount=2亿, 实际门槛=1.9亿."""
+        """默认容差5%."""
         config = _make_config()
         assert config.amount_tolerance_pct == 5.0
 
     def test_tolerance_passes_edge_case(self):
         """amount=1.92亿 + 容差5% → 通过（实际门槛1.9亿）."""
         from a_share_hot_screener.hard_filters import apply_hard_filters
-        config = _make_config()
+        config = _make_config(min_amount_avg_5d=200_000_000)
         result = apply_hard_filters(
             config=config,
             name="测试股",
@@ -358,14 +358,13 @@ class TestH6AmountTolerance:
             amount_avg_5d=192_000_000,  # 1.92亿 < 2亿 但 > 1.9亿
             float_market_cap=5_000_000_000,
         )
-        # 不应因 amount_too_low 而失败
         for reason in result.fail_reasons:
             assert "amount_too_low" not in reason
 
     def test_tolerance_still_fails_below_effective(self):
         """amount=1.85亿 + 容差5% → 仍然失败（<1.9亿）."""
         from a_share_hot_screener.hard_filters import apply_hard_filters
-        config = _make_config()
+        config = _make_config(min_amount_avg_5d=200_000_000)
         result = apply_hard_filters(
             config=config,
             name="测试股",
@@ -382,7 +381,7 @@ class TestH6AmountTolerance:
     def test_zero_tolerance(self):
         """容差=0%: 严格检查."""
         from a_share_hot_screener.hard_filters import apply_hard_filters
-        config = _make_config(amount_tolerance_pct=0.0)
+        config = _make_config(min_amount_avg_5d=200_000_000, amount_tolerance_pct=0.0)
         result = apply_hard_filters(
             config=config,
             name="测试股",
@@ -399,7 +398,7 @@ class TestH6AmountTolerance:
     def test_tolerance_message_includes_effective(self):
         """失败消息包含实际门槛信息."""
         from a_share_hot_screener.hard_filters import apply_hard_filters
-        config = _make_config()
+        config = _make_config(min_amount_avg_5d=200_000_000)
         result = apply_hard_filters(
             config=config,
             name="测试股",

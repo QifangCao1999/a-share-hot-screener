@@ -20,6 +20,9 @@ from a_share_hot_screener.config import HotScreenerConfig
 from a_share_hot_screener.event_layer import EventLayerProcessor, EventLayerResult
 from a_share_hot_screener.hard_filters import apply_hard_filters
 from a_share_hot_screener.models import HotStockDetail, ValidatedHotStock
+from a_share_hot_screener.holdertrade import compute_holder_trade_reduction
+from a_share_hot_screener.margin import compute_margin_metrics
+from a_share_hot_screener.moneyflow import compute_moneyflow_ratio
 from a_share_hot_screener.pledge_ratio import compute_pledge_ratio
 from a_share_hot_screener.price_features import PriceFeatures, compute_price_features
 from a_share_hot_screener.restricted_unlock import compute_restricted_unlock
@@ -318,6 +321,57 @@ def process_single_stock(
         except Exception as e:
             logger.warning("restricted_unlock(%s) 异常: %s", code, e)
             warns.append(f"[restricted_unlock] 异常: {e}")
+
+        # Step 6.9: 资金流向检测（Session 22 新增）
+        try:
+            trade_date_dt = dt.date.fromisoformat(trade_date_str)
+            flow_start = (trade_date_dt - dt.timedelta(days=15)).strftime("%Y%m%d")
+            flow_end = trade_date_str.replace("-", "")
+
+            mf_result = compute_moneyflow_ratio(
+                code=code,
+                tushare_client=tushare_client,
+                ts_code=ts_code,
+                start_date=flow_start,
+                end_date=flow_end,
+                warnings=warns,
+            )
+            detail.flags["net_main_inflow_ratio_5d"] = mf_result.net_main_inflow_ratio_5d
+        except Exception as e:
+            logger.warning("moneyflow(%s) 异常: %s", code, e)
+            warns.append(f"[moneyflow] 异常: {e}")
+
+        # Step 6.10: 股东增减持检测（Session 22 新增）
+        try:
+            ht_result = compute_holder_trade_reduction(
+                code=code,
+                tushare_client=tushare_client,
+                run_date=dt.date.fromisoformat(trade_date_str),
+                ts_code=ts_code,
+                warnings=warns,
+            )
+            detail.flags["net_holder_reduction_ratio_30d"] = ht_result.net_holder_reduction_ratio_30d
+        except Exception as e:
+            logger.warning("holdertrade(%s) 异常: %s", code, e)
+            warns.append(f"[holdertrade] 异常: {e}")
+
+        # Step 6.11: 融资融券检测（Session 22 新增）
+        try:
+            mg_result = compute_margin_metrics(
+                code=code,
+                tushare_client=tushare_client,
+                ts_code=ts_code,
+                start_date=flow_start,
+                end_date=flow_end,
+                amount_avg_5d=detail.amount_avg_5d,
+                warnings=warns,
+            )
+            detail.flags["margin_buy_net_ratio_5d"] = mg_result.margin_buy_net_ratio_5d
+            detail.flags["short_sell_ratio_change_5d"] = mg_result.short_sell_ratio_change_5d
+            detail.flags["is_margin_eligible"] = mg_result.is_margin_eligible
+        except Exception as e:
+            logger.warning("margin(%s) 异常: %s", code, e)
+            warns.append(f"[margin] 异常: {e}")
 
         # 评分由 pipeline 在并发完成后统一执行
         detail.pass_stage1 = False

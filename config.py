@@ -27,7 +27,7 @@ class HotScreenerConfig:
     # ── 基础筛选阈值（硬筛 H1-H9 对应参数）────────────────
     min_data_coverage: float = 0.75
     min_price: float = 3.0                      # H4: 最低价格（元）
-    min_amount_avg_5d: float = 200_000_000.0    # H6: 5日均成交额下限（元）
+    min_amount_avg_5d: float = 100_000_000.0    # H6: 5日均成交额下限（元）— P7: 从2亿降至1亿
     amount_tolerance_pct: float = 5.0             # H6: 成交额容差（%，允许边缘股通过）Session 11 新增
     min_float_market_cap: float = 1_500_000_000.0  # H7: 流通市值下限（元）
     min_trading_days: int = 20                  # H3: 最少已上市交易日数（去噪）
@@ -56,10 +56,10 @@ class HotScreenerConfig:
     include_finance: bool = False               # 是否保留金融行业（Session 10: 默认排除）
 
     # ── 模块开关（供后续 session 扩展）─────────────────
-    enable_concept_heat_module: bool = False    # 概念热度模块（需 6000 积分/600元年，自动检测权限）
-    enable_lhb_module: bool = True              # 龙虎榜模块（后续 session）
-    enable_unlock_risk_module: bool = False     # 解禁风险模块（后续 session）
-    enable_sector_rotation: bool = False        # 板块轮动信号（需 6000 积分/600元年，独立输出 sector_heat.csv）
+    enable_concept_heat_module: bool = True     # 概念热度模块（需 6000 积分，无权限时自动降级）Session 22: 默认开启
+    enable_lhb_module: bool = True              # 龙虎榜模块
+    enable_unlock_risk_module: bool = False     # 解禁风险模块
+    enable_sector_rotation: bool = True         # 板块轮动信号（需 6000 积分，无权限自动跳过）Session 22: 默认开启 + 接入HT7评分
 
     # ── preset 模式（Session 10）──────────────────────────
     # "default": 使用上方默认阈值
@@ -79,6 +79,7 @@ class HotScreenerConfig:
     # ── 批量运行（重构 #6）────────────────────────
     batch_size: int = 0                           # 0=不分批，>0 时每批处理此数量股票
     resume: bool = False                          # 断点续跑（跳过已完成批次）
+    global_pool: bool = True                      # P2: 批量模式下使用全局 scoring pool（消除批间百分位偏差）
 
     # ── 运行时派生（由 main 填充）───────────────────────
     cache_dir: str = ""

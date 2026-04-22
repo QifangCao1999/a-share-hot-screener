@@ -13,6 +13,9 @@
   Step 9:   时序连续性对比
   Step 10:  输出四类文件
   Step 11:  保存基准 pool
+
+P2 重构: 将 run() 拆分为 _run_data_collection() 和评分/输出阶段，
+         新增 run_data_only() 供 batch_runner 全局池模式使用。
 """
 
 from __future__ import annotations
@@ -71,21 +74,31 @@ class Stage1HotPipeline:
         self._rejected: List[RejectedRecord] = []
         self._event_ctx: Optional[EventLayerContext] = None
 
+        # P2: 实例属性，由 _run_data_collection() 填充
+        self._trade_date_str: str = ""
+        self._valid_codes: List[str] = []
+        self._invalid_codes: List[str] = []
+        self._validated: List[ValidatedHotStock] = []
+
         setup_logger("a_share_hot_screener", level=config.log_level)
 
-    # ── 主入口 ────────────────────────────────────────────
+    # ── 数据收集阶段 (Steps 0-6.12) ──────────────────────
 
-    def run(self) -> RunMetadata:
-        start_ts = time.time()
+    def _run_data_collection(self) -> None:
+        """Steps 0-6.12: 数据收集、校验、硬筛、特征提取、事件层填充.
+
+        P2 重构: 从 run() 提取，供 run() 和 run_data_only() 复用。
+        结果存储在 self._details, self._rejected 等实例属性中。
+        """
         cfg = self.config
 
         logger.info(
-            "=== A股短线热点筛选 S3 开始 | run_date=%s | codes=%d只 ===",
+            "=== A股短线热点筛选 开始 | run_date=%s | codes=%d只 ===",
             cfg.run_date_str, len(cfg.stock_codes),
         )
 
         # Step 0
-        valid_codes, invalid_codes = parse_stock_codes(cfg.stock_codes)
+        self._valid_codes, self._invalid_codes = parse_stock_codes(cfg.stock_codes)
 
         # Step 0.5: 交易日历加载 + trade_date_used
         logger.info("加载交易日历...")
@@ -94,8 +107,8 @@ class Stage1HotPipeline:
         for w in self._trade_cal.get_warnings():
             self.warnings.add_global(w)
         trade_date_used = self._trade_cal.get_trade_date_used()
-        trade_date_str = trade_date_used.isoformat()
-        logger.info("trade_date_used=%s (fallback=%s)", trade_date_str, self._trade_cal.is_fallback)
+        self._trade_date_str = trade_date_used.isoformat()
+        logger.info("trade_date_used=%s (fallback=%s)", self._trade_date_str, self._trade_cal.is_fallback)
 
         # Step 1
         logger.info("加载 Tushare daily_basic 全市场表...")
@@ -107,9 +120,9 @@ class Stage1HotPipeline:
             warnings=self.warnings,
             include_beijing=cfg.include_beijing,
         )
-        validated, pre_rejected = validator.validate(valid_codes, invalid_codes)
+        self._validated, pre_rejected = validator.validate(self._valid_codes, self._invalid_codes)
         self._rejected.extend(pre_rejected)
-        logger.info("校验: 通过=%d, 淘汰=%d", len(validated), len(pre_rejected))
+        logger.info("校验: 通过=%d, 淘汰=%d", len(self._validated), len(pre_rejected))
 
         # Step 2.5: 事件层批量加载
         logger.info("开始事件层批量加载...")
@@ -127,13 +140,61 @@ class Stage1HotPipeline:
 
         # Step 2.7: 预加载风控数据（pledge/float/holdnum）到缓存
         # 串行执行，避免并发工作线程中的 API 限流竞争
-        ts_codes_for_prefetch = [v.ts_code for v in validated if v.ts_code]
+        ts_codes_for_prefetch = [v.ts_code for v in self._validated if v.ts_code]
         if ts_codes_for_prefetch:
-            self._tushare.prefetch_risk_data(ts_codes_for_prefetch, trade_date_str)
+            self._tushare.prefetch_risk_data(ts_codes_for_prefetch, self._trade_date_str)
+
+        # Step 2.8: 预加载资金流向数据（moneyflow/holdertrade/margin）— Session 22
+        if ts_codes_for_prefetch:
+            import datetime as _dt
+            _td = _dt.date.fromisoformat(self._trade_date_str)
+            _flow_start = (_td - _dt.timedelta(days=60)).strftime("%Y%m%d")
+            _flow_end = self._trade_date_str.replace("-", "")
+            self._tushare.prefetch_flow_data(
+                ts_codes_for_prefetch,
+                start_date=_flow_start,
+                end_date=_flow_end,
+            )
+
+        # Step 2.9: 板块轮动分析（Session 22，需 6000积分，无权限自动跳过）
+        self._sector_momentum: Dict[str, str] = {}  # industry_name → momentum_switch
+        if cfg.enable_sector_rotation:
+            self._run_sector_rotation(self._trade_date_str)
 
         # Step 3~6: 并发处理（price_features + hard_filters + event_layer）
-        processed = self._run_concurrent(validated, trade_date_str)
+        processed = self._run_concurrent(self._validated, self._trade_date_str)
         self._details.extend(processed)
+
+        # Step 6.12: 填充板块轮动信号到 detail.flags（Session 22）
+        if self._sector_momentum and self._event_ctx is not None:
+            for detail in self._details:
+                # 通过 industry_cons_map 查找股票所属行业，fallback 到 detail.industry
+                ind_name = self._event_ctx.industry_cons_map.get(detail.code, detail.industry)
+                momentum = self._sector_momentum.get(ind_name, "neutral")
+                detail.flags["sector_momentum_signal"] = momentum
+
+    # ── 公共接口 ─────────────────────────────────────────
+
+    def run_data_only(self):
+        """Run data collection phase only (Steps 0-6.12).
+
+        P2: 用于 batch_runner 全局池模式，先收集各批数据再统一评分。
+
+        Returns:
+            (details, rejected, trade_date_str)
+        """
+        self._run_data_collection()
+        return self._details, self._rejected, self._trade_date_str
+
+    # ── 主入口 ────────────────────────────────────────────
+
+    def run(self) -> RunMetadata:
+        start_ts = time.time()
+
+        # Phase 1: 数据收集 (Steps 0-6.12)
+        self._run_data_collection()
+
+        cfg = self.config
 
         # Step 7: 四轴评分
         scoring_pool = ScoringPool.build(self._details)
@@ -201,10 +262,10 @@ class Stage1HotPipeline:
         # Step 10: 输出
         metadata = self._build_metadata(
             raw_input=cfg.stock_codes,
-            valid_codes=valid_codes,
-            invalid_codes=invalid_codes,
-            validated=validated,
-            trade_date_used=trade_date_str,
+            valid_codes=self._valid_codes,
+            invalid_codes=self._invalid_codes,
+            validated=self._validated,
+            trade_date_used=self._trade_date_str,
             elapsed=time.time() - start_ts,
             scoring_pool=scoring_pool,
             used_baseline=used_baseline,
@@ -269,6 +330,46 @@ class Stage1HotPipeline:
         if for_save:
             return auto_path
         return auto_path if os.path.isfile(auto_path) else ""
+
+    # ── 板块轮动 (Session 22) ───────────────────────────────
+
+    def _run_sector_rotation(self, trade_date_str: str) -> None:
+        """Step 2.9: 板块轮动分析 + 输出 sector_heat.csv + 构建 momentum 查找表."""
+        import datetime as _dt
+        from a_share_hot_screener.sector_rotation import SectorRotationAnalyzer
+
+        try:
+            run_date = _dt.date.fromisoformat(trade_date_str)
+            analyzer = SectorRotationAnalyzer(
+                tushare_client=self._tushare,
+                cache=self._cache,
+                run_date=run_date,
+                trade_dates=self._trade_cal._trade_dates,
+            )
+            rows = analyzer.analyze()
+            if not rows:
+                logger.warning("[sector_rotation] 无数据（可能无权限），跳过")
+                return
+
+            # 输出 sector_heat.csv
+            csv_path = os.path.join(
+                self.config.output_dir,
+                f"{trade_date_str}_sector_heat.csv",
+            )
+            analyzer.to_csv(rows, csv_path)
+
+            # 构建行业名称 → momentum_switch 查找表（仅取行业类型 I）
+            for row in rows:
+                if row.type == "I" and row.name:
+                    self._sector_momentum[row.name] = row.momentum_switch
+
+            logger.info(
+                "[sector_rotation] 完成: %d 个板块, 行业动量查找表 %d 项",
+                len(rows), len(self._sector_momentum),
+            )
+        except Exception as e:
+            logger.warning("[sector_rotation] 分析失败: %s", e)
+            self.warnings.add_global(f"[sector_rotation] 分析失败: {e}")
 
     # ── 并发调度 ─────────────────────────────────────────
 

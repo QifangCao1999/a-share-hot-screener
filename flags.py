@@ -125,6 +125,14 @@ def compute_flags(
     flags["pledge_ratio_latest"] = detail.flags.get("pledge_ratio_latest")
     flags["pledge_ratio_flag"] = detail.flags.get("pledge_ratio_flag")
 
+    # ── Session 22 新增：资金流向/股东增减持/融资融券/板块轮动 ────
+    flags["net_main_inflow_ratio_5d"] = detail.flags.get("net_main_inflow_ratio_5d")
+    flags["net_holder_reduction_ratio_30d"] = detail.flags.get("net_holder_reduction_ratio_30d")
+    flags["margin_buy_net_ratio_5d"] = detail.flags.get("margin_buy_net_ratio_5d")
+    flags["short_sell_ratio_change_5d"] = detail.flags.get("short_sell_ratio_change_5d")
+    flags["is_margin_eligible"] = detail.flags.get("is_margin_eligible")
+    flags["sector_momentum_signal"] = detail.flags.get("sector_momentum_signal")
+
     return flags
 
 

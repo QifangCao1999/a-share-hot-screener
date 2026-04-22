@@ -75,8 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-amount-avg-5d",
         type=float,
-        default=200_000_000.0,
-        help="5日均成交额下限（元）",
+        default=100_000_000.0,
+        help="5日均成交额下限（元，P7: 默认 1 亿）",
     )
     parser.add_argument(
         "--min-float-market-cap",
@@ -148,8 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable-concept-heat-module",
         action="store_true",
-        default=False,
-        help="启用概念热度模块（默认关闭）",
+        default=True,
+        help="启用概念热度模块（默认开启，无权限时自动降级）",
     )
     parser.add_argument(
         "--enable-lhb-module",
@@ -248,6 +248,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="清理旧版本缓存文件后退出（不执行筛选）",
     )
+    parser.add_argument(
+        "--cache-stats",
+        action="store_true",
+        default=False,
+        help="显示缓存统计信息后退出（P8）",
+    )
+    parser.add_argument(
+        "--purge-expired",
+        action="store_true",
+        default=False,
+        help="清理已过期缓存文件后退出（P8）",
+    )
+
+    # ── 全局池控制（P2）───────────────────────
+    parser.add_argument(
+        "--no-global-pool",
+        action="store_true",
+        default=False,
+        help="批量模式下禁用全局 scoring pool（每批独立评分，旧行为）",
+    )
 
     return parser
 
@@ -272,15 +292,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 初始化日志（在 config 构建前）
     logger = setup_logger("a_share_hot_screener", level=args.log_level)
 
-    # purge-cache 子命令（不需要 run_date / stock_codes）
+    # 缓存维护子命令（不需要 run_date / stock_codes）
+    cache_dir = args.cache_dir or os.path.join(
+        os.path.expanduser("~"), ".a_share_hot_screener", "cache"
+    )
+
     if args.purge_cache:
         from a_share_hot_screener.cache import LocalCache
-        cache_dir = args.cache_dir or os.path.join(
-            os.path.expanduser("~"), ".a_share_hot_screener", "cache"
-        )
         cache = LocalCache(cache_dir)
         removed = cache.purge_stale()
         logger.info("已清理 %d 个旧版本缓存文件 (cache_dir=%s)", removed, cache_dir)
+        return 0
+
+    if getattr(args, 'purge_expired', False):
+        from a_share_hot_screener.cache import LocalCache
+        cache = LocalCache(cache_dir)
+        removed = cache.purge_expired()
+        logger.info("已清理 %d 个过期缓存文件 (cache_dir=%s)", removed, cache_dir)
+        return 0
+
+    if getattr(args, 'cache_stats', False):
+        from a_share_hot_screener.cache import LocalCache
+        cache = LocalCache(cache_dir)
+        st = cache.stats()
+        print(f"\n缓存统计 (cache_dir={cache_dir})")
+        print(f"  schema_version: {st['schema_version']}")
+        print(f"  文件总数:       {st['file_count']}")
+        print(f"  总大小:         {st['size_mb']:.2f} MB")
+        print(f"  已过期:         {st['expired_count']}")
+        if st['namespaces']:
+            print("  命名空间:")
+            for ns, info in sorted(st['namespaces'].items()):
+                print(f"    {ns}: {info['file_count']} 文件, {info['size_mb']:.2f} MB")
         return 0
 
     # 解析 run_date
@@ -339,6 +382,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         prev_run_date=args.prev_run_date,
         batch_size=args.batch_size,
         resume=args.resume,
+        global_pool=not getattr(args, 'no_global_pool', False),
     )
 
     # 应用 preset（可能覆盖部分阈值）
