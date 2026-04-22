@@ -85,6 +85,12 @@ def apply_price_features(detail: HotStockDetail, feat: PriceFeatures) -> None:
     detail.big_up_count_10d = feat.big_up_count_10d
     detail.consec_up_days = feat.consec_up_days
 
+    # P0-4: 从 price_features 回填 pct_change_1d 和 amount_1d 到 detail 标准字段
+    if detail.pct_change_1d is None and feat.latest_pct_change is not None:
+        detail.pct_change_1d = feat.latest_pct_change
+    if detail.amount_1d is None and feat.latest_amount is not None:
+        detail.amount_1d = feat.latest_amount
+
     # 布尔趋势特征（基于均线）
     if feat.latest_close and feat.ma5 is not None:
         detail.above_ma5 = feat.latest_close > feat.ma5

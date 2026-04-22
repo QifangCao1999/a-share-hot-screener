@@ -359,6 +359,14 @@ class HotStockSummary:
     timing_support_basis: str = ""                    # ma10/ma20/swing_low/box_low
     timing_ref_reward_risk: Optional[float] = None
 
+    # ── P0-5: 资金流/股东增减持/融资融券/板块轮动 flags ───
+    net_main_inflow_ratio_5d: Optional[float] = None       # TF6 主力净流入占比
+    net_holder_reduction_ratio_30d: Optional[float] = None  # RC9 股东净减持占比
+    margin_buy_net_ratio_5d: Optional[float] = None         # TF7+RC10 融资净买入占比
+    short_sell_ratio_change_5d: Optional[float] = None      # RC10 融券余额变化率
+    is_margin_eligible: Optional[bool] = None               # 是否两融标的
+    sector_momentum_signal: str = ""                         # 板块轮动信号
+
     # ── 时序 delta（Session 14 P2-6）────────────────────
     prev_run_date: str = ""                              # 上次运行日期
     total_score_delta: Optional[float] = None            # total_score 变化量
@@ -404,6 +412,10 @@ class HotStockSummary:
             "shareholder_net_reduction_ratio_3m", "shareholder_reduction_flag_3m",
             "restricted_shares_unlock_ratio_20d", "unlock_risk_flag_20d",
             "pledge_ratio_latest", "pledge_ratio_flag",
+            # P0-5: 资金流/股东增减持/融资融券/板块轮动
+            "net_main_inflow_ratio_5d", "net_holder_reduction_ratio_30d",
+            "margin_buy_net_ratio_5d", "short_sell_ratio_change_5d",
+            "is_margin_eligible", "sector_momentum_signal",
         ]
         for fk in _flags_keys:
             kwargs[fk] = d.flags.get(fk)

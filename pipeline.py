@@ -112,9 +112,9 @@ class Stage1HotPipeline:
         self._trade_date_str = trade_date_used.isoformat()
         logger.info("trade_date_used=%s (fallback=%s)", self._trade_date_str, self._trade_cal.is_fallback)
 
-        # Step 1
+        # Step 1 — P0-1: 统一使用解析后的 trade_date_used（而非原始 run_date_str）
         logger.info("加载 Tushare daily_basic 全市场表...")
-        self._spot_universe.load(cfg.run_date_str)
+        self._spot_universe.load(self._trade_date_str)
 
         # Step 2
         validator = StockValidator(
@@ -147,10 +147,11 @@ class Stage1HotPipeline:
             self._tushare.prefetch_risk_data(ts_codes_for_prefetch, self._trade_date_str)
 
         # Step 2.8: 预加载资金流向数据（moneyflow/holdertrade/margin）— Session 22
+        # P0-2: 窗口必须与消费者一致（stock_processor Step 6.9/6.11 使用 15 天窗口）
         if ts_codes_for_prefetch:
             import datetime as _dt
             _td = _dt.date.fromisoformat(self._trade_date_str)
-            _flow_start = (_td - _dt.timedelta(days=60)).strftime("%Y%m%d")
+            _flow_start = (_td - _dt.timedelta(days=15)).strftime("%Y%m%d")
             _flow_end = self._trade_date_str.replace("-", "")
             self._tushare.prefetch_flow_data(
                 ts_codes_for_prefetch,
@@ -198,6 +199,18 @@ class Stage1HotPipeline:
 
         cfg = self.config
 
+        # P0-3: hard filter 失败的股票也进入 rejected 体系
+        for detail in self._details:
+            if not detail.passed_hard_filter and detail.hard_filter_reason:
+                self._rejected.append(RejectedRecord(
+                    code=detail.code,
+                    name=detail.name,
+                    reject_stage="hard_filter",
+                    reject_reason=detail.hard_filter_reason,
+                    reject_detail="; ".join(detail.hard_fail_reasons) if detail.hard_fail_reasons else "",
+                    warnings="; ".join(detail.warnings) if detail.warnings else "",
+                ))
+
         # Step 7: 四轴评分
         scoring_pool = ScoringPool.build(self._details)
         logger.info(
@@ -232,6 +245,7 @@ class Stage1HotPipeline:
                 apply_four_axis_scores(detail, scoring_pool, self.config, self.warnings)
 
         # Step 7.5: structured flags
+        # P0-5: 使用 merge 而非覆盖，保留 Step 6 已写入的自定义 flags
         for detail in self._details:
             try:
                 flags = compute_flags(
@@ -240,7 +254,7 @@ class Stage1HotPipeline:
                     enable_unlock_risk_module=cfg.enable_unlock_risk_module,
                     enable_concept_heat_module=cfg.enable_concept_heat_module,
                 )
-                detail.flags = flags
+                detail.flags.update(flags)
             except Exception as e:
                 logger.error("compute_flags(%s) 异常: %s", detail.code, e, exc_info=True)
                 self.warnings.add(detail.code, f"[flags] compute_flags 异常: {e}")
