@@ -133,6 +133,18 @@ def compute_flags(
     flags["is_margin_eligible"] = detail.flags.get("is_margin_eligible")
     flags["sector_momentum_signal"] = detail.flags.get("sector_momentum_signal")
 
+    # ── Phase 3: Context Scores (HT8/HT9/HT10 experimental) ────
+    _cs = detail.context_scores
+    if _cs:
+        flags["ht8_score"] = _cs.get("ht8_score")
+        flags["ht8_confirmation_level"] = _cs.get("ht8_confirmation_level")
+        flags["ht9_score"] = _cs.get("ht9_score")
+        flags["ht9_breadth_ratio"] = _cs.get("ht9_breadth_ratio")
+        flags["ht9_sector_name"] = _cs.get("ht9_sector_name")
+        flags["ht10_score"] = _cs.get("ht10_score")
+        flags["ht10_position_type"] = _cs.get("ht10_position_type")
+        flags["ht10_confidence"] = _cs.get("ht10_confidence")
+
     return flags
 
 

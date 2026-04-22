@@ -31,8 +31,11 @@ def apply_four_axis_scores(
     warnings: "WarningsCollector",
 ) -> None:
     """计算全部四轴评分（hot_theme / trend_flow / liquidity_execution / risk_control）并写入 detail."""
+    # Phase 3: context scores 可选纳入 HT 轴
+    _use_ctx = getattr(config, "use_context_scores_in_total", False) if config else False
+
     try:
-        ht = compute_hot_theme_score(detail, pool)
+        ht = compute_hot_theme_score(detail, pool, use_context_scores=_use_ctx)
         detail.hot_theme_score = ht.score
         detail.hot_theme_coverage = ht.coverage
         detail.hot_theme_subscores = ht.to_dict()

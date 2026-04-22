@@ -212,6 +212,9 @@ class HotStockDetail:
     advanced_concept_module_available: bool = False  # 概念热度模块是否成功运行
     concept_heat_source: str = ""
 
+    # ── Context Scores (Phase 3: HT8/HT9/HT10 experimental) ────
+    context_scores: Dict[str, Any] = field(default_factory=dict)  # ContextScoresResult.to_dict()
+
     # ── 时序 delta（Session 14 P2-6，由 trend_compare 模块填充）────
     trend_delta: Dict[str, Any] = field(default_factory=dict)  # TrendDelta.to_dict() 快照
 
@@ -336,6 +339,16 @@ class HotStockSummary:
     pledge_ratio_latest: Optional[float] = None
     pledge_ratio_flag: Optional[bool] = None
 
+    # ── Context Scores (Phase 3: HT8/HT9/HT10 experimental) ────
+    ht8_score: Optional[float] = None               # 市场确认度
+    ht8_confirmation_level: str = ""                  # 确认级别
+    ht9_score: Optional[float] = None               # 板块扩散度
+    ht9_breadth_ratio: Optional[float] = None       # 板块内涨幅>5%股票占比
+    ht9_sector_name: str = ""                        # 板块名称
+    ht10_score: Optional[float] = None              # 板块内辨识度
+    ht10_position_type: str = ""                     # frontline_like/capacity_core_like/follower_like/unknown
+    ht10_confidence: str = ""                        # high/medium
+
     # ── 时序 delta（Session 14 P2-6）────────────────────
     prev_run_date: str = ""                              # 上次运行日期
     total_score_delta: Optional[float] = None            # total_score 变化量
@@ -396,6 +409,17 @@ class HotStockSummary:
         kwargs["pass_stage1_change"] = _td.get("pass_stage1_change", "")
         kwargs["score_accelerating"] = _td.get("score_accelerating")
         kwargs["score_decelerating"] = _td.get("score_decelerating")
+
+        # ── 5. 显式覆写：context_scores dict 来源字段 ──────────
+        _cs = d.context_scores
+        kwargs["ht8_score"] = _cs.get("ht8_score")
+        kwargs["ht8_confirmation_level"] = _cs.get("ht8_confirmation_level", "")
+        kwargs["ht9_score"] = _cs.get("ht9_score")
+        kwargs["ht9_breadth_ratio"] = _cs.get("ht9_breadth_ratio")
+        kwargs["ht9_sector_name"] = _cs.get("ht9_sector_name", "")
+        kwargs["ht10_score"] = _cs.get("ht10_score")
+        kwargs["ht10_position_type"] = _cs.get("ht10_position_type", "")
+        kwargs["ht10_confidence"] = _cs.get("ht10_confidence", "")
 
         return cls(**kwargs)
 

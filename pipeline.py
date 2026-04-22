@@ -43,6 +43,7 @@ from a_share_hot_screener.output import OutputWriter
 from a_share_hot_screener.scoring import ScoringPool
 from a_share_hot_screener.scoring_aggregator import apply_four_axis_scores
 from a_share_hot_screener.stage1_judge import judge_pass_stage1
+from a_share_hot_screener.context_scores import compute_context_scores
 from a_share_hot_screener.stock_processor import process_single_stock
 from a_share_hot_screener.stock_codes import parse_stock_codes
 from a_share_hot_screener.trend_compare import compute_all_deltas, load_prev_run, PrevRunSnapshot
@@ -221,6 +222,10 @@ class Stage1HotPipeline:
                     scoring_pool.stock_count, baseline_path or "none",
                 )
 
+        # Step 6.15: Context Scores (Phase 3: HT8/HT9/HT10 experimental)
+        if cfg.compute_context_scores:
+            self._compute_context_scores()
+
         for detail in self._details:
             if detail.passed_hard_filter:
                 apply_four_axis_scores(detail, scoring_pool, self.config, self.warnings)
@@ -370,6 +375,107 @@ class Stage1HotPipeline:
         except Exception as e:
             logger.warning("[sector_rotation] 分析失败: %s", e)
             self.warnings.add_global(f"[sector_rotation] 分析失败: {e}")
+
+    # ── Context Scores (Phase 3) ──────────────────────────
+
+    def _compute_context_scores(self) -> None:
+        """Step 6.15: 计算 HT8/HT9/HT10 context scores 并写入 detail.context_scores."""
+        if self._event_ctx is None:
+            logger.warning("[context_scores] event_ctx 为空，跳过")
+            return
+
+        # 构建板块成分日线数据（从 details 中收集）
+        # 按概念板块分组: sector_name → {ts_code: {return_5d, amount_ratio, amount_5d, limit_up_count_5d}}
+        sector_member_data = self._build_sector_member_data()
+
+        computed = 0
+        for detail in self._details:
+            if not detail.passed_hard_filter:
+                continue
+
+            # 找到该股最强概念板块的成分数据
+            sector_data, sector_name = self._find_best_sector_data(
+                detail, sector_member_data,
+            )
+
+            try:
+                result = compute_context_scores(
+                    detail=detail,
+                    event_ctx=self._event_ctx,
+                    sector_members_daily=sector_data,
+                    sector_name=sector_name,
+                )
+                detail.context_scores = result.to_dict()
+                computed += 1
+            except Exception as e:
+                logger.error(
+                    "[context_scores] %s 计算异常: %s",
+                    detail.code, e, exc_info=True,
+                )
+                self.warnings.add(detail.code, f"[context_scores] 计算异常: {e}")
+
+        logger.info("[context_scores] 完成: %d 只股票计算了 context scores", computed)
+
+    def _build_sector_member_data(
+        self,
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        """从当前 details 中构建按概念板块分组的成分股日线数据.
+
+        Returns:
+            {sector_name: {ts_code: {return_5d, amount_ratio, amount_5d, limit_up_count_5d}}}
+        """
+        if self._event_ctx is None:
+            return {}
+
+        # 先构建 ts_code → detail 索引
+        detail_by_ts = {d.ts_code: d for d in self._details if d.passed_hard_filter and d.ts_code}
+
+        # concept_cons_map: {ts_code: [concept_names]}
+        sector_data: Dict[str, Dict[str, Dict[str, float]]] = {}
+
+        for ts_code, concepts in self._event_ctx.concept_cons_map.items():
+            d = detail_by_ts.get(ts_code)
+            if d is None:
+                continue  # 该股不在当前运行中
+
+            member_info = {
+                "return_5d": d.return_5d if d.return_5d is not None else 0.0,
+                "amount_ratio": d.amount_ratio_5d_to_20d if d.amount_ratio_5d_to_20d is not None else 1.0,
+                "amount_5d": (d.amount_avg_5d * 5) if d.amount_avg_5d is not None and d.amount_avg_5d > 0 else 0.0,
+                "limit_up_count_5d": d.limit_up_count_5d if d.limit_up_count_5d is not None else 0,
+            }
+
+            for concept in concepts:
+                if concept not in sector_data:
+                    sector_data[concept] = {}
+                sector_data[concept][ts_code] = member_info
+
+        return sector_data
+
+    def _find_best_sector_data(
+        self,
+        detail: "HotStockDetail",
+        sector_member_data: Dict[str, Dict[str, Dict[str, float]]],
+    ) -> tuple:
+        """找到该股所属最强概念板块的成分数据.
+
+        优先选择: concept_heat_pctile 最高的板块。
+        """
+        if not detail.concept_names or not sector_member_data:
+            return None, ""
+
+        best_data = None
+        best_name = ""
+        best_size = 0
+
+        for concept_name in detail.concept_names:
+            data = sector_member_data.get(concept_name)
+            if data is not None and len(data) > best_size:
+                best_data = data
+                best_name = concept_name
+                best_size = len(data)
+
+        return best_data, best_name
 
     # ── 并发调度 ─────────────────────────────────────────
 

@@ -189,8 +189,14 @@ def _resolve_pool_strategy(
 def compute_hot_theme_score(
     detail: "HotStockDetail",
     pool: ScoringPool,
+    use_context_scores: bool = False,
 ) -> AxisScore:
-    """计算单只股票的 hot_theme_score."""
+    """计算单只股票的 hot_theme_score.
+
+    Args:
+        use_context_scores: 若为 True 且 detail.context_scores 中有 HT8/9/10，
+            则将其作为 ScoreItem 纳入 HT 轴评分。
+    """
     axis = AxisScore(axis_name="hot_theme_score")
 
     # ── HT1: 近5日收益率 ─────────────────────────────────
@@ -350,6 +356,62 @@ def compute_hot_theme_score(
     else:
         ht7_item.is_data_available = False
     axis.items.append(ht7_item)
+
+    # ── HT8/HT9/HT10: Context Scores (Phase 3 experimental) ────
+    if use_context_scores:
+        _cs = detail.context_scores
+        # HT8: 市场确认度 weight=6
+        ht8_val = _cs.get("ht8_score")
+        axis.items.append(ScoreItem(
+            name="market_confirmation_score",
+            raw_value=_cs.get("ht8_confirmation_level"),
+            subscore=ht8_val,
+            weight=6.0,
+            is_applicable=True,
+            is_data_available=ht8_val is not None,
+            note=(
+                f"HT8 市场确认度(experimental)；"
+                f"level={_cs.get('ht8_confirmation_level')}；"
+                f"signals={_cs.get('ht8_signals', [])}；"
+                f"degraded={_cs.get('ht8_degraded', False)}"
+            ),
+        ))
+
+        # HT9: 板块扩散度 weight=5
+        ht9_val = _cs.get("ht9_score")
+        ht9_applicable = _cs.get("ht9_is_applicable", False)
+        axis.items.append(ScoreItem(
+            name="sector_breadth_score",
+            raw_value=_cs.get("ht9_breadth_ratio"),
+            subscore=ht9_val,
+            weight=5.0,
+            is_applicable=ht9_applicable,
+            is_data_available=ht9_val is not None,
+            note=(
+                f"HT9 板块扩散度(experimental)；"
+                f"breadth_ratio={_cs.get('ht9_breadth_ratio')}；"
+                f"sector={_cs.get('ht9_sector_name')}(size={_cs.get('ht9_sector_size', 0)})；"
+                f"cap={_cs.get('ht9_cap_applied', False)}"
+            ),
+        ))
+
+        # HT10: 板块内辨识度 weight=6
+        ht10_val = _cs.get("ht10_score")
+        ht10_applicable = _cs.get("ht10_is_applicable", False)
+        axis.items.append(ScoreItem(
+            name="sector_position_score",
+            raw_value=_cs.get("ht10_position_type"),
+            subscore=ht10_val,
+            weight=6.0,
+            is_applicable=ht10_applicable,
+            is_data_available=ht10_val is not None,
+            note=(
+                f"HT10 板块内辨识度(experimental)；"
+                f"position={_cs.get('ht10_position_type')}；"
+                f"confidence={_cs.get('ht10_confidence')}；"
+                f"degraded={_cs.get('ht10_degraded', False)}"
+            ),
+        ))
 
     axis.compute()
     return axis

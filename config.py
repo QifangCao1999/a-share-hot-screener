@@ -61,6 +61,11 @@ class HotScreenerConfig:
     enable_unlock_risk_module: bool = False     # 解禁风险模块
     enable_sector_rotation: bool = True         # 板块轮动信号（需 6000 积分，无权限自动跳过）Session 22: 默认开启 + 接入HT7评分
 
+    # ── Context Scores (Phase 3: HT8/HT9/HT10 experimental) ──
+    compute_context_scores: bool = True       # 是否计算 HT8/9/10 并输出到 CSV
+    use_context_scores_in_total: bool = False  # 是否纳入 HT 轴总分
+    show_context_scores_in_discord: bool = False  # 是否展示到 Discord 推送
+
     # ── preset 模式（Session 10）──────────────────────────
     # "default": 使用上方默认阈值
     # "relaxed":  自动降低各轴阈值，扩大候选集，适合初筛。
