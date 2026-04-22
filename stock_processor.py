@@ -285,102 +285,7 @@ def process_single_stock(
             apply_event_layer(detail, ev_result)
             warns.extend(ev_result.warnings)
 
-        # Step 6.6: 股东减持检测
-        try:
-            sr_result = compute_shareholder_reduction(
-                code=code,
-                tushare_client=tushare_client,
-                run_date=dt.date.fromisoformat(trade_date_str),
-                ts_code=ts_code,
-                warnings=warns,
-            )
-            detail.flags["shareholder_net_reduction_ratio_3m"] = sr_result.shareholder_net_reduction_ratio_3m
-            detail.flags["shareholder_reduction_flag_3m"] = sr_result.shareholder_reduction_flag_3m
-        except Exception as e:
-            logger.warning("shareholder_reduction(%s) 异常: %s", code, e)
-            warns.append(f"[shareholder_reduction] 异常: {e}")
-
-        # Step 6.7: 质押比例检测
-        try:
-            pr_result = compute_pledge_ratio(
-                code=code,
-                tushare_client=tushare_client,
-                run_date=dt.date.fromisoformat(trade_date_str),
-                ts_code=ts_code,
-                warnings=warns,
-            )
-            detail.flags["pledge_ratio_latest"] = pr_result.pledge_ratio_latest
-            detail.flags["pledge_ratio_flag"] = pr_result.pledge_ratio_flag
-        except Exception as e:
-            logger.warning("pledge_ratio(%s) 异常: %s", code, e)
-            warns.append(f"[pledge_ratio] 异常: {e}")
-
-        # Step 6.8: 限售解禁检测
-        try:
-            ru_result = compute_restricted_unlock(
-                code=code,
-                tushare_client=tushare_client,
-                run_date=dt.date.fromisoformat(trade_date_str),
-                ts_code=ts_code,
-                warnings=warns,
-            )
-            detail.flags["restricted_shares_unlock_ratio_20d"] = ru_result.restricted_shares_unlock_ratio_20d
-            detail.flags["unlock_risk_flag_20d"] = ru_result.unlock_risk_flag_20d
-        except Exception as e:
-            logger.warning("restricted_unlock(%s) 异常: %s", code, e)
-            warns.append(f"[restricted_unlock] 异常: {e}")
-
-        # Step 6.9: 资金流向检测（Session 22 新增）
-        try:
-            trade_date_dt = dt.date.fromisoformat(trade_date_str)
-            flow_start = (trade_date_dt - dt.timedelta(days=15)).strftime("%Y%m%d")
-            flow_end = trade_date_str.replace("-", "")
-
-            mf_result = compute_moneyflow_ratio(
-                code=code,
-                tushare_client=tushare_client,
-                ts_code=ts_code,
-                start_date=flow_start,
-                end_date=flow_end,
-                warnings=warns,
-            )
-            detail.flags["net_main_inflow_ratio_5d"] = mf_result.net_main_inflow_ratio_5d
-        except Exception as e:
-            logger.warning("moneyflow(%s) 异常: %s", code, e)
-            warns.append(f"[moneyflow] 异常: {e}")
-
-        # Step 6.10: 股东增减持检测（Session 22 新增）
-        try:
-            ht_result = compute_holder_trade_reduction(
-                code=code,
-                tushare_client=tushare_client,
-                run_date=dt.date.fromisoformat(trade_date_str),
-                ts_code=ts_code,
-                warnings=warns,
-            )
-            detail.flags["net_holder_reduction_ratio_30d"] = ht_result.net_holder_reduction_ratio_30d
-        except Exception as e:
-            logger.warning("holdertrade(%s) 异常: %s", code, e)
-            warns.append(f"[holdertrade] 异常: {e}")
-
-        # Step 6.11: 融资融券检测（Session 22 新增）
-        try:
-            mg_result = compute_margin_metrics(
-                code=code,
-                tushare_client=tushare_client,
-                ts_code=ts_code,
-                start_date=flow_start,
-                end_date=flow_end,
-                amount_avg_5d=detail.amount_avg_5d,
-                warnings=warns,
-            )
-            detail.flags["margin_buy_net_ratio_5d"] = mg_result.margin_buy_net_ratio_5d
-            detail.flags["short_sell_ratio_change_5d"] = mg_result.short_sell_ratio_change_5d
-            detail.flags["is_margin_eligible"] = mg_result.is_margin_eligible
-        except Exception as e:
-            logger.warning("margin(%s) 异常: %s", code, e)
-            warns.append(f"[margin] 异常: {e}")
-
+        # D6: Step 6.6~6.11 移至 enrich_risk_flow_data()，硬筛后再执行
         # 评分由 pipeline 在并发完成后统一执行
         detail.pass_stage1 = False
 
@@ -390,3 +295,132 @@ def process_single_stock(
 
     detail.warnings = warns
     return detail
+
+
+# ════════════════════════════════════════════════════════
+# D6: 硬筛后补充风控+资金数据 (Step 6.6~6.11)
+# ════════════════════════════════════════════════════════
+
+def enrich_risk_flow_data(
+    detail: HotStockDetail,
+    trade_date_str: str,
+    tushare_client: TushareClient,
+) -> None:
+    """为通过硬筛的股票补充风控和资金流向数据 (Step 6.6~6.11).
+
+    D6 重构：从 process_single_stock 中拆分出来，只对通过硬筛的股票执行，
+    避免对已淘汰股票做无用的 API 调用。
+
+    Args:
+        detail: 已通过 hard_filter 的 HotStockDetail
+        trade_date_str: YYYY-MM-DD
+        tushare_client: TushareClient 实例
+    """
+    code = detail.code
+    ts_code = detail.ts_code
+    if detail.warnings is None:
+        detail.warnings = []
+    warns = detail.warnings
+
+    if not ts_code:
+        return
+
+    # Step 6.6: 股东减持检测
+    try:
+        sr_result = compute_shareholder_reduction(
+            code=code,
+            tushare_client=tushare_client,
+            run_date=dt.date.fromisoformat(trade_date_str),
+            ts_code=ts_code,
+            warnings=warns,
+        )
+        detail.flags["shareholder_net_reduction_ratio_3m"] = sr_result.shareholder_net_reduction_ratio_3m
+        detail.flags["shareholder_reduction_flag_3m"] = sr_result.shareholder_reduction_flag_3m
+    except Exception as e:
+        logger.warning("shareholder_reduction(%s) 异常: %s", code, e)
+        warns.append(f"[shareholder_reduction] 异常: {e}")
+
+    # Step 6.7: 质押比例检测
+    try:
+        pr_result = compute_pledge_ratio(
+            code=code,
+            tushare_client=tushare_client,
+            run_date=dt.date.fromisoformat(trade_date_str),
+            ts_code=ts_code,
+            warnings=warns,
+        )
+        detail.flags["pledge_ratio_latest"] = pr_result.pledge_ratio_latest
+        detail.flags["pledge_ratio_flag"] = pr_result.pledge_ratio_flag
+    except Exception as e:
+        logger.warning("pledge_ratio(%s) 异常: %s", code, e)
+        warns.append(f"[pledge_ratio] 异常: {e}")
+
+    # Step 6.8: 限售解禁检测
+    try:
+        ru_result = compute_restricted_unlock(
+            code=code,
+            tushare_client=tushare_client,
+            run_date=dt.date.fromisoformat(trade_date_str),
+            ts_code=ts_code,
+            warnings=warns,
+        )
+        detail.flags["restricted_shares_unlock_ratio_20d"] = ru_result.restricted_shares_unlock_ratio_20d
+        detail.flags["unlock_risk_flag_20d"] = ru_result.unlock_risk_flag_20d
+    except Exception as e:
+        logger.warning("restricted_unlock(%s) 异常: %s", code, e)
+        warns.append(f"[restricted_unlock] 异常: {e}")
+
+    # Step 6.9: 资金流向检测
+    try:
+        trade_date_dt = dt.date.fromisoformat(trade_date_str)
+        flow_start = (trade_date_dt - dt.timedelta(days=15)).strftime("%Y%m%d")
+        flow_end = trade_date_str.replace("-", "")
+
+        mf_result = compute_moneyflow_ratio(
+            code=code,
+            tushare_client=tushare_client,
+            ts_code=ts_code,
+            start_date=flow_start,
+            end_date=flow_end,
+            warnings=warns,
+        )
+        detail.flags["net_main_inflow_ratio_5d"] = mf_result.net_main_inflow_ratio_5d
+    except Exception as e:
+        logger.warning("moneyflow(%s) 异常: %s", code, e)
+        warns.append(f"[moneyflow] 异常: {e}")
+
+    # Step 6.10: 股东增减持检测
+    try:
+        ht_result = compute_holder_trade_reduction(
+            code=code,
+            tushare_client=tushare_client,
+            run_date=dt.date.fromisoformat(trade_date_str),
+            ts_code=ts_code,
+            warnings=warns,
+        )
+        detail.flags["net_holder_reduction_ratio_30d"] = ht_result.net_holder_reduction_ratio_30d
+    except Exception as e:
+        logger.warning("holdertrade(%s) 异常: %s", code, e)
+        warns.append(f"[holdertrade] 异常: {e}")
+
+    # Step 6.11: 融资融券检测
+    try:
+        trade_date_dt = dt.date.fromisoformat(trade_date_str)
+        flow_start = (trade_date_dt - dt.timedelta(days=15)).strftime("%Y%m%d")
+        flow_end = trade_date_str.replace("-", "")
+
+        mg_result = compute_margin_metrics(
+            code=code,
+            tushare_client=tushare_client,
+            ts_code=ts_code,
+            start_date=flow_start,
+            end_date=flow_end,
+            amount_avg_5d=detail.amount_avg_5d,
+            warnings=warns,
+        )
+        detail.flags["margin_buy_net_ratio_5d"] = mg_result.margin_buy_net_ratio_5d
+        detail.flags["short_sell_ratio_change_5d"] = mg_result.short_sell_ratio_change_5d
+        detail.flags["is_margin_eligible"] = mg_result.is_margin_eligible
+    except Exception as e:
+        logger.warning("margin(%s) 异常: %s", code, e)
+        warns.append(f"[margin] 异常: {e}")

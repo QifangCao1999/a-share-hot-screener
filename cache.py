@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Any, Optional
 
 # 全局缓存 schema 版本号。
 # 递增此值即可令所有旧缓存自动失效（键哈希包含版本号）。
-CACHE_SCHEMA_VERSION = "v2"
+CACHE_SCHEMA_VERSION = "v3"  # D1: 缓存键跨日复用重构，日线/资金流 API 使用对齐窗口
 
 
 class LocalCache:
@@ -95,7 +96,7 @@ class LocalCache:
             return round(self._hit_count / total, 4)
 
     def put(self, namespace: str, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        """写入缓存."""
+        """写入缓存（原子写：tempfile + os.replace，防止写入中断导致损坏）."""
         effective_ttl = ttl if ttl is not None else self.default_ttl
         path = self._path(namespace, key)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,10 +107,22 @@ class LocalCache:
             "expire_at": time.time() + effective_ttl,
             "value": value,
         }
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, default=str),
-            encoding="utf-8",
+        content = json.dumps(payload, ensure_ascii=False, default=str)
+        # 原子写入：先写临时文件，再 rename（同文件系统下 os.replace 是原子操作）
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), suffix=".tmp", prefix=".cache_",
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            # 清理临时文件
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def invalidate(self, namespace: str, key: str) -> bool:
         """删除指定缓存条目，返回是否确实删除了."""

@@ -45,7 +45,7 @@ from a_share_hot_screener.scoring_aggregator import apply_four_axis_scores
 from a_share_hot_screener.stage1_judge import judge_pass_stage1
 from a_share_hot_screener.context_scores import compute_context_scores
 from a_share_hot_screener.setup_timing import run_setup_timing as _run_setup_timing_batch
-from a_share_hot_screener.stock_processor import process_single_stock
+from a_share_hot_screener.stock_processor import enrich_risk_flow_data, process_single_stock
 from a_share_hot_screener.stock_codes import parse_stock_codes
 from a_share_hot_screener.trend_compare import compute_all_deltas, load_prev_run, PrevRunSnapshot
 from a_share_hot_screener.trade_calendar import TradeCalendar
@@ -140,33 +140,22 @@ class Stage1HotPipeline:
         for w in self._event_ctx.global_warnings:
             self.warnings.add_global(w)
 
-        # Step 2.7: 预加载风控数据（pledge/float/holdnum）到缓存
-        # 串行执行，避免并发工作线程中的 API 限流竞争
-        ts_codes_for_prefetch = [v.ts_code for v in self._validated if v.ts_code]
-        if ts_codes_for_prefetch:
-            self._tushare.prefetch_risk_data(ts_codes_for_prefetch, self._trade_date_str)
-
-        # Step 2.8: 预加载资金流向数据（moneyflow/holdertrade/margin）— Session 22
-        # P0-2: 窗口必须与消费者一致（stock_processor Step 6.9/6.11 使用 15 天窗口）
-        if ts_codes_for_prefetch:
-            import datetime as _dt
-            _td = _dt.date.fromisoformat(self._trade_date_str)
-            _flow_start = (_td - _dt.timedelta(days=15)).strftime("%Y%m%d")
-            _flow_end = self._trade_date_str.replace("-", "")
-            self._tushare.prefetch_flow_data(
-                ts_codes_for_prefetch,
-                start_date=_flow_start,
-                end_date=_flow_end,
-            )
+        # D6: Step 2.7/2.8 预加载移到硬筛后，只对通过硬筛的股票执行
 
         # Step 2.9: 板块轮动分析（Session 22，需 6000积分，无权限自动跳过）
         self._sector_momentum: Dict[str, str] = {}  # industry_name → momentum_switch
         if cfg.enable_sector_rotation:
             self._run_sector_rotation(self._trade_date_str)
 
-        # Step 3~6: 并发处理（price_features + hard_filters + event_layer）
+        # Step 3~6.5: Phase 1 并发处理（price_features + hard_filters + event_layer）
+        # D6: 不包含 Step 6.6~6.11（风控+资金数据）
         processed = self._run_concurrent(self._validated, self._trade_date_str)
         self._details.extend(processed)
+
+        # D6: Step 2.7+2.8 预加载 + Step 6.6~6.11 只对通过硬筛的股票执行
+        passed_details = [d for d in self._details if d.passed_hard_filter and d.ts_code]
+        if passed_details:
+            self._prefetch_and_enrich_risk_flow(passed_details, self._trade_date_str)
 
         # Step 6.12: 填充板块轮动信号到 detail.flags（Session 22）
         if self._sector_momentum and self._event_ctx is not None:
@@ -302,6 +291,9 @@ class Stage1HotPipeline:
             metadata=metadata,
         )
 
+        # Step 10b: 补充 sector_heat / setup_timing 到 output_files
+        self._append_extra_output_files(metadata, self._trade_date_str)
+
         # Step 11: 保存基准 pool
         if cfg.save_baseline_pool and scoring_pool.stock_count >= cfg.min_baseline_pool_size and not used_baseline:
             save_path = self._resolve_baseline_pool_path(for_save=True)
@@ -315,6 +307,92 @@ class Stage1HotPipeline:
             len(self._rejected),
         )
         return metadata
+
+    # ── D6: 硬筛后预加载 + 风控资金数据补充 ─────────
+
+    def _prefetch_and_enrich_risk_flow(
+        self,
+        passed_details: List[HotStockDetail],
+        trade_date_str: str,
+    ) -> None:
+        """D6: 只对通过硬筛的股票预加载风控+资金数据，然后并发补充.
+
+        之前对全部 validated 股票预加载，现在只对通过硬筛的股票执行，
+        节省约 16%~20% 的 API 调用。
+        """
+        import datetime as _dt
+
+        ts_codes = [d.ts_code for d in passed_details]
+        logger.info(
+            "[D6] 硬筛后预加载: %d 只股票（跳过 %d 只未通过硬筛）",
+            len(ts_codes),
+            len(self._details) - len(passed_details),
+        )
+
+        # Step 2.7: 预加载风控数据（pledge/float/holdnum）
+        self._tushare.prefetch_risk_data(ts_codes, trade_date_str)
+
+        # Step 2.8: 预加载资金流向数据（moneyflow/holdertrade/margin）
+        _td = _dt.date.fromisoformat(trade_date_str)
+        _flow_start = (_td - _dt.timedelta(days=15)).strftime("%Y%m%d")
+        _flow_end = trade_date_str.replace("-", "")
+        self._tushare.prefetch_flow_data(
+            ts_codes,
+            start_date=_flow_start,
+            end_date=_flow_end,
+        )
+
+        # Step 6.6~6.11: 并发补充风控+资金数据
+        max_w = min(self.config.max_workers, len(passed_details))
+        if max_w <= 1:
+            for detail in passed_details:
+                enrich_risk_flow_data(detail, trade_date_str, self._tushare)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _enrich(d: HotStockDetail) -> str:
+                enrich_risk_flow_data(d, trade_date_str, self._tushare)
+                return d.code
+
+            with ThreadPoolExecutor(max_workers=max_w) as executor:
+                futs = {executor.submit(_enrich, d): d.code for d in passed_details}
+                for fut in as_completed(futs):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        code = futs[fut]
+                        logger.error("[D6] enrich_risk_flow(%s) 异常: %s", code, e)
+
+        logger.info("[D6] 风控+资金数据补充完成: %d 只", len(passed_details))
+
+    # ── 补充输出文件 ──────────────────────────────
+
+    def _append_extra_output_files(
+        self, metadata: RunMetadata, trade_date_str: str,
+    ) -> None:
+        """Step 10b: 将 sector_heat.csv / setup_timing.csv 路径追加到 metadata.output_files.
+
+        如果文件存在，更新 metadata.output_files 并重写 metadata JSON。
+        """
+        extra_files = {}
+        sector_heat_path = os.path.join(
+            self.config.output_dir, f"{trade_date_str}_sector_heat.csv",
+        )
+        if os.path.isfile(sector_heat_path):
+            extra_files["sector_heat"] = sector_heat_path
+
+        timing_path = os.path.join(
+            self.config.output_dir, f"{trade_date_str}_setup_timing.csv",
+        )
+        if os.path.isfile(timing_path):
+            extra_files["setup_timing"] = timing_path
+
+        if extra_files:
+            metadata.output_files.update(extra_files)
+            # 重写 metadata JSON（已包含新字段）
+            meta_path = metadata.output_files.get("metadata", "")
+            if meta_path and os.path.isfile(meta_path):
+                self._writer.write_metadata(metadata, meta_path)
 
     # ── 时序连续性加载 ─────────────────────────────────────
 

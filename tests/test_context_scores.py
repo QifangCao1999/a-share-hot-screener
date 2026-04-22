@@ -620,6 +620,7 @@ class TestContextScoresResult:
             "ht10_score", "ht10_rank_pctile", "ht10_amount_share_score",
             "ht10_first_zt_score", "ht10_is_applicable",
             "ht10_position_type", "ht10_confidence", "ht10_degraded",
+            "context_sector_source", "context_sector_member_count",
         }
         assert set(d.keys()) == expected_keys
 

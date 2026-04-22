@@ -52,14 +52,14 @@ class TestP02PrefetchWindow:
         import inspect
         from a_share_hot_screener import pipeline, stock_processor
 
-        # pipeline Step 2.8: 预取窗口
-        pipeline_src = inspect.getsource(pipeline.Stage1HotPipeline._run_data_collection)
+        # D6: 预取窗口移到 _prefetch_and_enrich_risk_flow
+        prefetch_src = inspect.getsource(pipeline.Stage1HotPipeline._prefetch_and_enrich_risk_flow)
         # 确认使用 days=15（而非 days=60）
-        assert "timedelta(days=15)" in pipeline_src
-        assert "timedelta(days=60)" not in pipeline_src
+        assert "timedelta(days=15)" in prefetch_src
+        assert "timedelta(days=60)" not in prefetch_src
 
-        # stock_processor Step 6.9: 消费窗口
-        sp_src = inspect.getsource(stock_processor.process_single_stock)
+        # stock_processor Step 6.9: 消费窗口 (现在在 enrich_risk_flow_data 中)
+        sp_src = inspect.getsource(stock_processor.enrich_risk_flow_data)
         assert "timedelta(days=15)" in sp_src
 
 

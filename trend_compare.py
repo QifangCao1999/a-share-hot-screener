@@ -167,11 +167,14 @@ def _parse_summary_csv(path: str) -> Optional[PrevRunSnapshot]:
         logger.warning("[trend_compare] summary CSV 为空: %s", path)
         return None
 
-    # 从文件名提取 trade_date_used
+    # 从文件名提取 run_date 作为 fallback
     fname = os.path.basename(path)
     date_prefix = fname.split("_stage1_hot_summary")[0]  # e.g. "2026-04-17"
 
-    snapshot = PrevRunSnapshot(trade_date_used=date_prefix)
+    # 优先从对应的 metadata JSON 读取真实 trade_date_used
+    trade_date_used = _read_trade_date_from_metadata(path, date_prefix) or date_prefix
+
+    snapshot = PrevRunSnapshot(trade_date_used=trade_date_used)
     for row in rows:
         code = row.get("code", "").strip()
         if not code:
@@ -394,3 +397,32 @@ def _round_opt(v: Optional[float], ndigits: int = 4) -> Optional[float]:
     if v is None:
         return None
     return round(v, ndigits)
+
+
+def _read_trade_date_from_metadata(
+    summary_path: str, date_prefix: str,
+) -> Optional[str]:
+    """从对应的 metadata JSON 读取真实 trade_date_used.
+
+    查找策略：将 summary CSV 路径的 `_stage1_hot_summary.csv` 替换为
+    `_stage1_hot_metadata.json`，如果存在则读取 trade_date_used 字段。
+
+    Returns:
+        trade_date_used 字符串 (YYYY-MM-DD)，或 None。
+    """
+    import json as _json
+
+    meta_path = summary_path.replace(
+        "_stage1_hot_summary.csv", "_stage1_hot_metadata.json",
+    )
+    if not os.path.isfile(meta_path):
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = _json.load(f)
+        td = meta.get("trade_date_used", "")
+        if td and isinstance(td, str) and len(td) >= 10:
+            return td[:10]  # YYYY-MM-DD
+    except Exception as e:
+        logger.debug("[trend_compare] 读取 metadata 失败(%s): %s", meta_path, e)
+    return None

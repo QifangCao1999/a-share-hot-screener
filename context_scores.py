@@ -93,6 +93,9 @@ class ContextScoresResult:
             "ht10_position_type": self.ht10_position_type,
             "ht10_confidence": self.ht10_confidence,
             "ht10_degraded": self.ht10_degraded,
+            # Step 6.15 辅助输出: 板块来源 + 样本量
+            "context_sector_source": self.ht9_sector_name,
+            "context_sector_member_count": self.ht9_sector_size,
         }
 
 

@@ -15,17 +15,98 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import random
 import time
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from a_share_hot_screener.cache import LocalCache
 
 logger = logging.getLogger("a_share_hot_screener.tushare_client")
+
+
+# ═══════════════════════════════════════════════════════
+# D1: 缓存键跨日复用 — 对齐窗口工具函数
+# ═══════════════════════════════════════════════════════
+
+def _align_date_range(
+    start_date: str,
+    end_date: str,
+    align_days: int = 90,
+) -> Tuple[str, str]:
+    """将日期范围扩展并对齐到固定边界，使相邻交易日共享缓存键.
+
+    策略：end_date 对齐到未来最近的 align_days 边界（以 2020-01-01 为锚点），
+    start_date 向前扩展一个完整周期。
+
+    例如 align_days=90, end_date=20260422:
+      → aligned_end = 2026-06-30 (下一个90天边界)
+      → aligned_start = aligned_end - 2*align_days = 2026-04-01
+
+    这样 4/21~4/22 的请求共享同一个缓存条目。
+
+    Args:
+        start_date: YYYYMMDD
+        end_date: YYYYMMDD
+        align_days: 对齐周期（天）
+
+    Returns:
+        (aligned_start_YYYYMMDD, aligned_end_YYYYMMDD)
+    """
+    anchor = _dt.date(2020, 1, 1)
+    try:
+        end_dt = _dt.datetime.strptime(end_date, "%Y%m%d").date()
+        start_dt = _dt.datetime.strptime(start_date, "%Y%m%d").date()
+    except (ValueError, TypeError):
+        return start_date, end_date  # fallback: 不对齐
+
+    # end_date 对齐到下一个周期边界
+    days_since_anchor = (end_dt - anchor).days
+    remainder = days_since_anchor % align_days
+    aligned_end_dt = end_dt + _dt.timedelta(days=(align_days - remainder) if remainder > 0 else 0)
+
+    # start_date: 确保覆盖原始范围，向前至少多一个周期
+    original_span = (end_dt - start_dt).days
+    # 至少覆盖 original_span + align_days 的缓冲
+    needed = original_span + align_days
+    aligned_start_dt = aligned_end_dt - _dt.timedelta(days=needed)
+    # 再对齐 start 到周期边界（向前取整）
+    days_since_anchor_s = (aligned_start_dt - anchor).days
+    remainder_s = days_since_anchor_s % align_days
+    if remainder_s > 0:
+        aligned_start_dt = aligned_start_dt - _dt.timedelta(days=remainder_s)
+
+    return aligned_start_dt.strftime("%Y%m%d"), aligned_end_dt.strftime("%Y%m%d")
+
+
+def _slice_df_by_date(
+    df: Optional[pd.DataFrame],
+    start_date: str,
+    end_date: str,
+    date_col: str = "trade_date",
+) -> Optional[pd.DataFrame]:
+    """从对齐后的宽 DataFrame 中切出请求的日期范围.
+
+    Args:
+        df: 宽范围 DataFrame
+        start_date: 原始请求的 start_date (YYYYMMDD)
+        end_date: 原始请求的 end_date (YYYYMMDD)
+        date_col: 日期列名
+
+    Returns:
+        切片后的 DataFrame，或 None/empty 如果输入为 None/empty。
+    """
+    if df is None or df.empty:
+        return df
+    if date_col not in df.columns:
+        return df
+    # Tushare 日期格式为 YYYYMMDD 字符串
+    mask = (df[date_col] >= start_date) & (df[date_col] <= end_date)
+    return df[mask].copy()
 
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 2.0
@@ -105,7 +186,9 @@ class TushareClient:
         tag = label or api_name
         for attempt in range(1, max_retries + 1):
             try:
-                _token_bucket.acquire()
+                acquired = _token_bucket.acquire()
+                if not acquired:
+                    logger.warning("[tushare] %s rate-limiter timeout, proceeding anyway", tag)
                 df = getattr(self.pro, api_name)(**kwargs)
                 if df is None:
                     raise ValueError(f"{tag} 返回 None")
@@ -215,6 +298,9 @@ class TushareClient:
     ) -> Optional[pd.DataFrame]:
         """获取个股日线行情.
 
+        D1 重构：使用对齐窗口缓存，相邻交易日共享缓存条目。
+        实际 API 请求范围大于请求范围，返回时切片到原始范围。
+
         Args:
             ts_code: Tushare 格式，如 '000001.SZ'
             start_date: YYYYMMDD
@@ -224,12 +310,15 @@ class TushareClient:
             DataFrame: ts_code, trade_date, open, high, low, close, pre_close,
                        change, pct_chg, vol(手), amount(千元)
         """
-        cache_key = f"daily_{ts_code}_{start_date}_{end_date}"
+        # D1: 对齐日期范围以提高跨日缓存命中率
+        aligned_start, aligned_end = _align_date_range(start_date, end_date, align_days=90)
+        cache_key = f"daily_{ts_code}_{aligned_start}_{aligned_end}"
         if use_cache and self.cache:
             cached = self.cache.get("tushare_daily", cache_key, ttl=cache_ttl)
             if cached is not None:
                 try:
-                    return pd.DataFrame(cached)
+                    wide_df = pd.DataFrame(cached)
+                    return _slice_df_by_date(wide_df, start_date, end_date)
                 except Exception:
                     pass
 
@@ -237,13 +326,13 @@ class TushareClient:
             "daily",
             label=f"daily({ts_code})",
             ts_code=ts_code,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=aligned_start,
+            end_date=aligned_end,
         )
         if df is not None and not df.empty and use_cache and self.cache:
             self.cache.put("tushare_daily", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
-        return df
+        return _slice_df_by_date(df, start_date, end_date)
 
     # ═══════════════════════════════════════════════════════
     # 每日指标 (2000pt) — 替代 AkShare spot
@@ -402,7 +491,7 @@ class TushareClient:
             label=f"pledge_stat({ts_code})",
             ts_code=ts_code,
         )
-        if df is not None and not df.empty and use_cache and self.cache:
+        if df is not None and use_cache and self.cache:
             self.cache.put("tushare_pledge", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
         return df
@@ -437,7 +526,7 @@ class TushareClient:
             label=f"share_float({ts_code})",
             ts_code=ts_code,
         )
-        if df is not None and not df.empty and use_cache and self.cache:
+        if df is not None and use_cache and self.cache:
             self.cache.put("tushare_float", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
         return df
@@ -476,7 +565,7 @@ class TushareClient:
             label=f"stk_holdernumber({ts_code})",
             **kwargs,
         )
-        if df is not None and not df.empty and use_cache and self.cache:
+        if df is not None and use_cache and self.cache:
             self.cache.put("tushare_holdnum", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
         return df
@@ -727,31 +816,44 @@ class TushareClient:
     ) -> Optional[pd.DataFrame]:
         """获取个股资金流向.
 
+        D1 重构：使用对齐窗口缓存，相邻交易日共享缓存条目。
+
         Returns:
             DataFrame: ts_code, trade_date, buy_sm_amount(万元),
                        sell_sm_amount, buy_md_amount, sell_md_amount,
                        buy_lg_amount, sell_lg_amount, buy_elg_amount,
                        sell_elg_amount, net_mf_amount
         """
-        cache_key = f"moneyflow_{ts_code}_{start_date}_{end_date}"
+        # D1: 对齐日期范围
+        if start_date and end_date:
+            aligned_start, aligned_end = _align_date_range(start_date, end_date, align_days=30)
+        else:
+            aligned_start, aligned_end = start_date, end_date
+
+        cache_key = f"moneyflow_{ts_code}_{aligned_start}_{aligned_end}"
         if use_cache and self.cache:
             cached = self.cache.get("tushare_moneyflow", cache_key, ttl=cache_ttl)
             if cached is not None:
                 try:
-                    return pd.DataFrame(cached)
+                    wide_df = pd.DataFrame(cached)
+                    if start_date and end_date:
+                        return _slice_df_by_date(wide_df, start_date, end_date)
+                    return wide_df
                 except Exception:
                     pass
 
         kwargs: Dict[str, Any] = {"ts_code": ts_code}
-        if start_date:
-            kwargs["start_date"] = start_date
-        if end_date:
-            kwargs["end_date"] = end_date
+        if aligned_start:
+            kwargs["start_date"] = aligned_start
+        if aligned_end:
+            kwargs["end_date"] = aligned_end
 
         df = self._call("moneyflow", label=f"moneyflow({ts_code})", **kwargs)
-        if df is not None and not df.empty and use_cache and self.cache:
+        if df is not None and use_cache and self.cache:
             self.cache.put("tushare_moneyflow", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
+        if start_date and end_date:
+            return _slice_df_by_date(df, start_date, end_date)
         return df
 
     # ═══════════════════════════════════════════════════════
@@ -768,33 +870,46 @@ class TushareClient:
     ) -> Optional[pd.DataFrame]:
         """获取重要股东/高管增减持公告.
 
+        D1 重构：使用对齐窗口缓存，相邻交易日共享缓存条目。
+
         Returns:
             DataFrame: ts_code, ann_date, holder_name, holder_type,
                        in_de(IN/DE), change_vol(万股), change_ratio(占流通%),
                        after_share, after_ratio, avg_price, total_share,
                        begin_date, close_date
         """
-        cache_key = f"holdertrade_{ts_code}_{start_date}_{end_date}"
+        # D1: 对齐日期范围
+        if start_date and end_date:
+            aligned_start, aligned_end = _align_date_range(start_date, end_date, align_days=90)
+        else:
+            aligned_start, aligned_end = start_date, end_date
+
+        cache_key = f"holdertrade_{ts_code}_{aligned_start}_{aligned_end}"
         if use_cache and self.cache:
             cached = self.cache.get("tushare_holdertrade", cache_key, ttl=cache_ttl)
             if cached is not None:
                 try:
-                    return pd.DataFrame(cached)
+                    wide_df = pd.DataFrame(cached)
+                    if start_date and end_date:
+                        return _slice_df_by_date(wide_df, start_date, end_date, date_col="ann_date")
+                    return wide_df
                 except Exception:
                     pass
 
         kwargs: Dict[str, Any] = {}
         if ts_code:
             kwargs["ts_code"] = ts_code
-        if start_date:
-            kwargs["start_date"] = start_date
-        if end_date:
-            kwargs["end_date"] = end_date
+        if aligned_start:
+            kwargs["start_date"] = aligned_start
+        if aligned_end:
+            kwargs["end_date"] = aligned_end
 
         df = self._call("stk_holdertrade", label=f"stk_holdertrade({ts_code})", **kwargs)
-        if df is not None and not df.empty and use_cache and self.cache:
+        if df is not None and use_cache and self.cache:
             self.cache.put("tushare_holdertrade", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
+        if start_date and end_date:
+            return _slice_df_by_date(df, start_date, end_date, date_col="ann_date")
         return df
 
     # ═══════════════════════════════════════════════════════
@@ -812,37 +927,66 @@ class TushareClient:
     ) -> Optional[pd.DataFrame]:
         """获取个股融资融券明细.
 
+        D1 重构：日期范围模式使用对齐窗口缓存，单日模式不变。
+
         Returns:
             DataFrame: ts_code, trade_date, rzye(融资余额), rqye(融券余额),
                        rzmre(融资买入额), rzche(融资偿还额),
                        rqmcl(融券卖出量), rqchl(融券偿还量)
         """
         if trade_date:
+            # 单日模式：不对齐
             cache_key = f"margin_{ts_code}_{trade_date}"
+            if use_cache and self.cache:
+                cached = self.cache.get("tushare_margin", cache_key, ttl=cache_ttl)
+                if cached is not None:
+                    try:
+                        return pd.DataFrame(cached)
+                    except Exception:
+                        pass
+
+            kwargs: Dict[str, Any] = {}
+            if ts_code:
+                kwargs["ts_code"] = ts_code
+            kwargs["trade_date"] = trade_date
+
+            df = self._call("margin_detail", label=f"margin_detail({ts_code})", **kwargs)
+            if df is not None and use_cache and self.cache:
+                self.cache.put("tushare_margin", cache_key, df.to_dict("records"), ttl=cache_ttl)
+            return df
+
+        # D1: 日期范围模式，对齐缓存
+        if start_date and end_date:
+            aligned_start, aligned_end = _align_date_range(start_date, end_date, align_days=30)
         else:
-            cache_key = f"margin_{ts_code}_{start_date}_{end_date}"
+            aligned_start, aligned_end = start_date, end_date
+
+        cache_key = f"margin_{ts_code}_{aligned_start}_{aligned_end}"
         if use_cache and self.cache:
             cached = self.cache.get("tushare_margin", cache_key, ttl=cache_ttl)
             if cached is not None:
                 try:
-                    return pd.DataFrame(cached)
+                    wide_df = pd.DataFrame(cached)
+                    if start_date and end_date:
+                        return _slice_df_by_date(wide_df, start_date, end_date)
+                    return wide_df
                 except Exception:
                     pass
 
-        kwargs: Dict[str, Any] = {}
+        kwargs2: Dict[str, Any] = {}
         if ts_code:
-            kwargs["ts_code"] = ts_code
-        if trade_date:
-            kwargs["trade_date"] = trade_date
-        if start_date:
-            kwargs["start_date"] = start_date
-        if end_date:
-            kwargs["end_date"] = end_date
+            kwargs2["ts_code"] = ts_code
+        if aligned_start:
+            kwargs2["start_date"] = aligned_start
+        if aligned_end:
+            kwargs2["end_date"] = aligned_end
 
-        df = self._call("margin_detail", label=f"margin_detail({ts_code})", **kwargs)
-        if df is not None and not df.empty and use_cache and self.cache:
+        df = self._call("margin_detail", label=f"margin_detail({ts_code})", **kwargs2)
+        if df is not None and use_cache and self.cache:
             self.cache.put("tushare_margin", cache_key, df.to_dict("records"), ttl=cache_ttl)
 
+        if start_date and end_date:
+            return _slice_df_by_date(df, start_date, end_date)
         return df
 
     # ═══════════════════════════════════════════════════════

@@ -49,9 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stock-codes",
-        required=True,
         nargs="+",
+        default=[],
         help="输入股票代码，支持逗号分隔字符串或多个参数",
+    )
+    parser.add_argument(
+        "--stock-codes-file",
+        default="",
+        help="从文本文件读取股票代码（每行一个或逗号分隔，# 开头为注释）",
     )
     parser.add_argument(
         "--output-dir",
@@ -339,8 +344,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("run_date 解析失败: %s", e)
         return 1
 
-    # 解析 stock_codes（支持 "600519,000858" 和 ["600519", "000858"] 两种形式）
-    raw_codes = " ".join(args.stock_codes) if isinstance(args.stock_codes, list) else args.stock_codes
+    # 解析 stock_codes（支持 CLI 参数 + 文件两种来源）
+    all_raw_codes = []
+    if args.stock_codes:
+        all_raw_codes.append(
+            " ".join(args.stock_codes) if isinstance(args.stock_codes, list) else args.stock_codes
+        )
+    if args.stock_codes_file:
+        file_codes = _read_stock_codes_file(args.stock_codes_file)
+        if file_codes is None:
+            logger.error("无法读取股票代码文件: %s", args.stock_codes_file)
+            return 1
+        all_raw_codes.append(file_codes)
+    if not all_raw_codes:
+        logger.error("未提供股票代码，请通过 --stock-codes 或 --stock-codes-file 提供")
+        return 1
+    raw_codes = " ".join(all_raw_codes)
     valid_codes, invalid_codes = parse_stock_codes(raw_codes)
     if invalid_codes:
         logger.warning("以下代码格式无效，将被忽略: %s", invalid_codes)
@@ -424,6 +443,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:
         logger.error("Pipeline 运行失败: %s", e, exc_info=True)
         return 1
+
+
+def _read_stock_codes_file(path: str) -> Optional[str]:
+    """Read stock codes from a text file.
+
+    Format: one code per line, or comma-separated. Lines starting with # are comments.
+    Blank lines are ignored.
+
+    Returns:
+        Space-separated codes string, or None if file cannot be read.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            codes = []
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Support comma-separated codes on a single line
+                for part in line.replace(",", " ").split():
+                    part = part.strip()
+                    if part:
+                        codes.append(part)
+            return " ".join(codes) if codes else ""
+    except (OSError, IOError):
+        return None
 
 
 if __name__ == "__main__":
