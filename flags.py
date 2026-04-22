@@ -145,6 +145,16 @@ def compute_flags(
         flags["ht10_position_type"] = _cs.get("ht10_position_type")
         flags["ht10_confidence"] = _cs.get("ht10_confidence")
 
+    # ── Phase 4: Setup Timing (观察时机 experimental) ────
+    _st = detail.setup_timing
+    if _st:
+        flags["timing_score"] = _st.get("timing_score")
+        flags["timing_action"] = _st.get("action")
+        flags["timing_level_confidence"] = _st.get("level_confidence")
+        flags["timing_support_basis"] = _st.get("support_basis")
+        flags["timing_ref_reward_risk"] = _st.get("ref_reward_risk")
+        flags["timing_market_regime"] = _st.get("market_regime")
+
     return flags
 
 

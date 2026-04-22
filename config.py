@@ -66,6 +66,10 @@ class HotScreenerConfig:
     use_context_scores_in_total: bool = False  # 是否纳入 HT 轴总分
     show_context_scores_in_discord: bool = False  # 是否展示到 Discord 推送
 
+    # ── Setup Timing (Phase 4: 观察时机 experimental) ──
+    enable_setup_timing: bool = False          # 是否启用观察时机评估
+    setup_timing_index_code: str = "000001.SH"  # 大盘指数代码 (上证指数)
+
     # ── preset 模式（Session 10）──────────────────────────
     # "default": 使用上方默认阈值
     # "relaxed":  自动降低各轴阈值，扩大候选集，适合初筛。

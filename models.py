@@ -218,6 +218,9 @@ class HotStockDetail:
     # ── 时序 delta（Session 14 P2-6，由 trend_compare 模块填充）────
     trend_delta: Dict[str, Any] = field(default_factory=dict)  # TrendDelta.to_dict() 快照
 
+    # ── Setup Timing (Phase 4: 观察时机 experimental) ────
+    setup_timing: Dict[str, Any] = field(default_factory=dict)  # SetupSignal.to_dict()
+
     # ── warnings ─────────────────────────────────────────────
     warnings: List[str] = field(default_factory=list)
 
@@ -349,6 +352,13 @@ class HotStockSummary:
     ht10_position_type: str = ""                     # frontline_like/capacity_core_like/follower_like/unknown
     ht10_confidence: str = ""                        # high/medium
 
+    # ── Setup Timing (Phase 4: 观察时机 experimental) ────
+    timing_score: Optional[float] = None             # 0~100
+    timing_action: str = ""                           # setup_ready/watch/wait/avoid_chase
+    timing_level_confidence: str = ""                 # high/medium/low
+    timing_support_basis: str = ""                    # ma10/ma20/swing_low/box_low
+    timing_ref_reward_risk: Optional[float] = None
+
     # ── 时序 delta（Session 14 P2-6）────────────────────
     prev_run_date: str = ""                              # 上次运行日期
     total_score_delta: Optional[float] = None            # total_score 变化量
@@ -420,6 +430,14 @@ class HotStockSummary:
         kwargs["ht10_score"] = _cs.get("ht10_score")
         kwargs["ht10_position_type"] = _cs.get("ht10_position_type", "")
         kwargs["ht10_confidence"] = _cs.get("ht10_confidence", "")
+
+        # ── 6. 显式覆写：setup_timing dict 来源字段 ────────
+        _st = d.setup_timing
+        kwargs["timing_score"] = _st.get("timing_score")
+        kwargs["timing_action"] = _st.get("action", "")
+        kwargs["timing_level_confidence"] = _st.get("level_confidence", "")
+        kwargs["timing_support_basis"] = _st.get("support_basis", "")
+        kwargs["timing_ref_reward_risk"] = _st.get("ref_reward_risk")
 
         return cls(**kwargs)
 

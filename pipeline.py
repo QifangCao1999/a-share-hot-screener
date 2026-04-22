@@ -44,6 +44,7 @@ from a_share_hot_screener.scoring import ScoringPool
 from a_share_hot_screener.scoring_aggregator import apply_four_axis_scores
 from a_share_hot_screener.stage1_judge import judge_pass_stage1
 from a_share_hot_screener.context_scores import compute_context_scores
+from a_share_hot_screener.setup_timing import run_setup_timing as _run_setup_timing_batch
 from a_share_hot_screener.stock_processor import process_single_stock
 from a_share_hot_screener.stock_codes import parse_stock_codes
 from a_share_hot_screener.trend_compare import compute_all_deltas, load_prev_run, PrevRunSnapshot
@@ -249,6 +250,10 @@ class Stage1HotPipeline:
             rejected = judge_pass_stage1(detail, cfg)
             if rejected is not None:
                 self._rejected.append(rejected)
+
+        # Step 8.5: Setup Timing (Phase 4: 观察时机 experimental)
+        if cfg.enable_setup_timing:
+            self._run_setup_timing(self._trade_date_str)
 
         # Step 9: 时序连续性 / 趋势加速信号
         prev_snapshot = self._load_prev_run()
@@ -476,6 +481,100 @@ class Stage1HotPipeline:
                 best_size = len(data)
 
         return best_data, best_name
+
+    # ── Setup Timing (Phase 4) ────────────────────────
+
+    def _run_setup_timing(self, trade_date_str: str) -> None:
+        """Step 8.5: 观察时机评估 (experimental).
+
+        只对 pass_stage1 (tradeable) 的股票运行。
+        结果写入 detail.setup_timing dict + 输出 CSV。
+        """
+        import datetime as _dt
+
+        tradeable = [d for d in self._details if d.pass_stage1]
+        if not tradeable:
+            logger.info("[setup_timing] 无 tradeable 股票，跳过")
+            return
+
+        # 获取大盘指数近20日收盘价
+        index_closes_20d = None
+        try:
+            index_code = self.config.setup_timing_index_code
+            trade_date = _dt.date.fromisoformat(trade_date_str)
+            start_date = self._trade_cal.n_trade_dates_before(trade_date, 25)
+            index_df = self._tushare.get_daily(
+                ts_code=index_code,
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=trade_date_str.replace("-", ""),
+            )
+            if index_df is not None and not index_df.empty:
+                # 按日期升序
+                idx_sorted = index_df.sort_values("trade_date")
+                index_closes_20d = idx_sorted["close"].tolist()[-20:]
+        except Exception as e:
+            logger.warning("[setup_timing] 获取大盘指数失败: %s", e)
+            self.warnings.add_global(f"[setup_timing] 获取大盘指数失败: {e}")
+
+        # 运行评估
+        signals = _run_setup_timing_batch(
+            details=tradeable,
+            tushare_client=self._tushare,
+            trade_cal=self._trade_cal,
+            trade_date_str=trade_date_str,
+            index_closes_20d=index_closes_20d,
+        )
+
+        # 写入 detail.setup_timing
+        signal_by_code = {s.code: s for s in signals}
+        for detail in self._details:
+            sig = signal_by_code.get(detail.code)
+            if sig is not None:
+                detail.setup_timing = sig.to_dict()
+
+        # 输出 CSV
+        if signals:
+            self._write_setup_timing_csv(signals, trade_date_str)
+
+        logger.info(
+            "[setup_timing] 完成: %d只评估 | setup_ready=%d watch=%d wait=%d avoid=%d",
+            len(signals),
+            sum(1 for s in signals if s.action == "setup_ready"),
+            sum(1 for s in signals if s.action == "watch"),
+            sum(1 for s in signals if s.action == "wait"),
+            sum(1 for s in signals if s.action == "avoid_chase"),
+        )
+
+    def _write_setup_timing_csv(self, signals, trade_date_str: str) -> None:
+        """Write setup_timing results to CSV."""
+        import csv
+
+        csv_path = os.path.join(
+            self.config.output_dir,
+            f"{trade_date_str}_setup_timing.csv",
+        )
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+
+        fieldnames = [
+            "code", "name", "timing_score", "action",
+            "trend_score", "pullback_score", "volume_score",
+            "repair_score", "risk_score",
+            "support_zone_low", "support_zone_high",
+            "invalidation_level", "resistance_1",
+            "ref_reward_risk", "level_confidence",
+            "support_basis", "market_regime", "market_multiplier",
+            "reason", "warnings",
+        ]
+
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for sig in sorted(signals, key=lambda s: -s.timing_score):
+                row = sig.to_dict()
+                row["warnings"] = "; ".join(row.get("warnings", []))
+                writer.writerow(row)
+
+        logger.info("[setup_timing] CSV 输出: %s", csv_path)
 
     # ── 并发调度 ─────────────────────────────────────────
 
