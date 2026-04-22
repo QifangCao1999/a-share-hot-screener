@@ -55,12 +55,14 @@ class OutputWriter:
         metadata: RunMetadata,
     ) -> None:
         """写入全部输出文件，并将路径更新到 metadata.output_files."""
-        run_date = metadata.run_date  # YYYY-MM-DD
+        # Bug fix: 使用 trade_date_used 而非 run_date 作为文件名前缀
+        # 非交易日运行时 run_date 与实际数据日期不一致，用 trade_date_used 语义更准确
+        date_prefix = metadata.trade_date_used or metadata.run_date  # YYYY-MM-DD
 
-        summary_path = self._path(run_date, "stage1_hot_summary.csv")
-        detail_path = self._path(run_date, "stage1_hot_detail.csv")
-        rejected_path = self._path(run_date, "stage1_hot_rejected.csv")
-        metadata_path = self._path(run_date, "stage1_hot_metadata.json")
+        summary_path = self._path(date_prefix, "stage1_hot_summary.csv")
+        detail_path = self._path(date_prefix, "stage1_hot_detail.csv")
+        rejected_path = self._path(date_prefix, "stage1_hot_rejected.csv")
+        metadata_path = self._path(date_prefix, "stage1_hot_metadata.json")
 
         self.write_summary(details, summary_path)
         self.write_detail(details, detail_path)

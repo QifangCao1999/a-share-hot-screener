@@ -544,10 +544,28 @@ class TushareClient:
     ) -> Optional[pd.DataFrame]:
         """获取个股股东人数变动.
 
+        D1-style: start_date 对齐到 180 天边界，使相邻交易日共享缓存键。
+
         Returns:
             DataFrame: ts_code, ann_date, end_date, holder_num
         """
-        cache_key = f"holdnum_{ts_code}_{start_date}"
+        # 对齐 start_date 到 180 天边界（向前取整），end_date 不适用
+        aligned_start = start_date
+        if start_date:
+            try:
+                anchor = _dt.date(2020, 1, 1)
+                start_dt = _dt.datetime.strptime(start_date, "%Y%m%d").date()
+                days_since = (start_dt - anchor).days
+                remainder = days_since % 180
+                if remainder > 0:
+                    aligned_start_dt = start_dt - _dt.timedelta(days=remainder)
+                else:
+                    aligned_start_dt = start_dt
+                aligned_start = aligned_start_dt.strftime("%Y%m%d")
+            except (ValueError, TypeError):
+                aligned_start = start_date  # fallback
+
+        cache_key = f"holdnum_{ts_code}_{aligned_start}"
         if use_cache and self.cache:
             cached = self.cache.get("tushare_holdnum", cache_key, ttl=cache_ttl)
             if cached is not None:
@@ -557,8 +575,8 @@ class TushareClient:
                     pass
 
         kwargs = {"ts_code": ts_code}
-        if start_date:
-            kwargs["start_date"] = start_date
+        if aligned_start:
+            kwargs["start_date"] = aligned_start
 
         df = self._call(
             "stk_holdernumber",
@@ -1029,6 +1047,19 @@ class TushareClient:
             except Exception:
                 pass
 
+        # Bug fix: holdnum key 对齐，与 get_stk_holdernumber 内部一致
+        aligned_holdnum_start = start_date
+        if start_date:
+            try:
+                anchor = dt.date(2020, 1, 1)
+                start_dt = dt.datetime.strptime(start_date, "%Y%m%d").date()
+                days_since = (start_dt - anchor).days
+                remainder = days_since % 180
+                if remainder > 0:
+                    aligned_holdnum_start = (start_dt - dt.timedelta(days=remainder)).strftime("%Y%m%d")
+            except (ValueError, TypeError):
+                pass
+
         # 过滤已缓存的，收集需要拉取的任务
         tasks: List[tuple] = []  # (ts_code, api_type)
         for ts_code in ts_codes:
@@ -1036,7 +1067,7 @@ class TushareClient:
                 tasks.append((ts_code, 'pledge'))
             if not (self.cache and self.cache.get("tushare_float", f"share_float_{ts_code}", ttl=86400) is not None):
                 tasks.append((ts_code, 'float'))
-            holdnum_key = f"holdnum_{ts_code}_{start_date}"
+            holdnum_key = f"holdnum_{ts_code}_{aligned_holdnum_start}"
             if not (self.cache and self.cache.get("tushare_holdnum", holdnum_key, ttl=86400) is not None):
                 tasks.append((ts_code, 'holdnum'))
 
@@ -1093,15 +1124,26 @@ class TushareClient:
         if not ts_codes:
             return stats
 
+        # Bug fix: 使用与 get_moneyflow/get_stk_holdertrade/get_margin_detail
+        # 相同的 _align_date_range 对齐后日期构造 key，确保 skip 判断命中缓存。
+        if start_date and end_date:
+            aligned_mf_start, aligned_mf_end = _align_date_range(start_date, end_date, align_days=30)
+            aligned_ht_start, aligned_ht_end = _align_date_range(start_date, end_date, align_days=90)
+            aligned_mg_start, aligned_mg_end = _align_date_range(start_date, end_date, align_days=30)
+        else:
+            aligned_mf_start, aligned_mf_end = start_date, end_date
+            aligned_ht_start, aligned_ht_end = start_date, end_date
+            aligned_mg_start, aligned_mg_end = start_date, end_date
+
         tasks: List[tuple] = []
         for ts_code in ts_codes:
-            mf_key = f"moneyflow_{ts_code}_{start_date}_{end_date}"
+            mf_key = f"moneyflow_{ts_code}_{aligned_mf_start}_{aligned_mf_end}"
             if not (self.cache and self.cache.get("tushare_moneyflow", mf_key, ttl=86400) is not None):
                 tasks.append((ts_code, 'moneyflow'))
-            ht_key = f"holdertrade_{ts_code}_{start_date}_{end_date}"
+            ht_key = f"holdertrade_{ts_code}_{aligned_ht_start}_{aligned_ht_end}"
             if not (self.cache and self.cache.get("tushare_holdertrade", ht_key, ttl=86400) is not None):
                 tasks.append((ts_code, 'holdertrade'))
-            mg_key = f"margin_{ts_code}_{start_date}_{end_date}"
+            mg_key = f"margin_{ts_code}_{aligned_mg_start}_{aligned_mg_end}"
             if not (self.cache and self.cache.get("tushare_margin", mg_key, ttl=86400) is not None):
                 tasks.append((ts_code, 'margin'))
 
