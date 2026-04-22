@@ -170,6 +170,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="启用解禁风险模块（默认关闭）",
     )
+    parser.add_argument(
+        "--enable-setup-timing",
+        action="store_true",
+        default=False,
+        help="启用观察时机评估 (Phase 4, experimental, 默认关闭)",
+    )
 
     # ── 运行控制 ──────────────────────────────────────────
     parser.add_argument(
@@ -372,6 +378,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         enable_concept_heat_module=args.enable_concept_heat_module,
         enable_lhb_module=args.enable_lhb_module,
         enable_unlock_risk_module=args.enable_unlock_risk_module,
+        enable_setup_timing=args.enable_setup_timing,
         max_workers=args.max_workers,
         log_level=args.log_level,
         cache_dir=args.cache_dir,
