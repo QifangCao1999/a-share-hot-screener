@@ -14,6 +14,14 @@ v2.1 关键变更:
   - 权重归一: 0.22 + 0.28 + 0.22 + 0.16 + 0.12 = 1.00
   - 大盘环境仅乘数调节，不作为独立评分维度
   - level_confidence 评估参考价位可靠性
+
+v3.0 关键变更 (Round 1):
+  - 新增 SetupTimingConfig 独立配置类
+  - 新增 Action Cap 硬规则体系 (14条规则，限制高风险结构的action上限)
+  - 回踩参数波动率自适应 (ATR% 驱动钟形曲线参数)
+  - 接入 Stage 1 四轴分数 (stage1_context 联动)
+  - 增强 reason/warnings 解释性
+  - 预留盘中执行接口 (requires_intraday_confirmation)
 """
 
 from __future__ import annotations
@@ -41,10 +49,81 @@ THRESHOLD_SETUP_READY = 80.0
 THRESHOLD_WATCH = 65.0
 THRESHOLD_WAIT = 45.0
 
-# 大盘环境乘数
+# 大盘环境乘数 (v2.1 原始)
 MARKET_MULT_BULL = 1.10
 MARKET_MULT_NEUTRAL = 1.00
 MARKET_MULT_BEAR = 0.75
+
+# v3.0 增强版乘数
+MARKET_MULT_RISK_ON = 1.10
+MARKET_MULT_RISK_OFF = 0.85
+
+# Action 优先级 (越小越严格)
+_ACTION_RANK = {
+    "avoid_chase": 0,
+    "wait": 1,
+    "watch": 2,
+    "setup_ready": 3,
+}
+
+
+# ════════════════════════════════════════════════════════
+# 配置类
+# ════════════════════════════════════════════════════════
+
+@dataclass
+class SetupTimingConfig:
+    """Setup timing 内部参数配置.
+
+    所有参数都有保守默认值。旧行为可通过关闭各 enable_ 开关恢复。
+    """
+
+    # ── 模块开关 ────────────────────────────────────────
+    enable_action_caps: bool = True                 # 启用 action cap 硬规则
+    enable_volatility_adaptive_pullback: bool = True  # 启用波动率自适应回踩参数
+    enable_stage1_context: bool = True              # 启用 Stage 1 四轴联动
+
+    # ── Action cap 阈值 ────────────────────────────────
+    cap_min_risk_score_for_ready: float = 0.25      # risk_score < 此值 → 最高 wait
+    cap_min_risk_score_critical: float = 0.15       # risk_score < 此值 → 强制 avoid_chase
+    cap_min_reward_risk_for_ready: float = 1.0      # ref_reward_risk < 此值 → 最高 watch
+    cap_min_reward_risk_critical: float = 0.6       # ref_reward_risk < 此值 → 最高 wait
+    cap_max_dist_ma20_for_ready: float = 0.12       # 距 MA20 > 12% → 最高 watch
+    cap_max_dist_ma20_critical: float = 0.18        # 距 MA20 > 18% → 最高 wait
+    cap_max_atr_pct_for_ready: float = 10.0         # ATR% > 10% → 最高 watch
+    cap_atr_drawdown_atr_threshold: float = 8.0     # ATR% > 8% 且 drawdown > 10% → wait
+    cap_atr_drawdown_dd_threshold: float = 10.0     # 配合上条
+    cap_max_upper_shadow_days: int = 2              # 上影线 > 此值 → 最高 wait
+    cap_max_limit_board_days: int = 1               # 近5日一字板 > 此值 → 最高 watch
+    cap_bear_ready_threshold: float = 85.0          # bear + timing < 此值 → 不允许 setup_ready
+    cap_bear_min_risk_score: float = 0.4            # bear + risk_score < 此值 → 最高 wait
+
+    # ── 波动率自适应回踩参数 ────────────────────────────
+    pullback_min_center: float = 0.03               # 回踩深度 center 下限
+    pullback_max_center: float = 0.10               # 回踩深度 center 上限
+    pullback_atr_multiplier: float = 1.0            # center = atr_ratio * multiplier
+
+    # ── Stage 1 联动阈值 ────────────────────────────────
+    min_hot_theme_for_ready: float = 0.55           # hot_theme < 此值 → setup_ready 降级
+    min_liquidity_for_ready: float = 0.50           # liquidity < 此值 → setup_ready 降级
+    min_liquidity_critical: float = 0.35            # liquidity < 此值 → 最高 wait
+    min_stage1_risk_for_ready: float = 0.40         # stage1 risk_control < 此值 → 降级
+    min_stage1_risk_critical: float = 0.25          # stage1 risk_control < 此值 → 最高 wait
+    high_priority_hot_theme: float = 0.75           # hot_theme >= 此值 且 timing >= 75 → high_priority
+    high_priority_timing: float = 75.0              # 配合上条
+    stage1_bottom_pctile_timing: float = 85.0       # total_score 后50% 需 timing >= 此值才能 setup_ready
+
+    # ── Market Regime 增强 (v3.0) ──────────────────────
+    enable_enhanced_market_regime: bool = False      # 启用增强版大盘环境判断
+    risk_on_multiplier: float = 1.10                # risk_on 乘数
+    risk_off_multiplier: float = 0.85               # risk_off 乘数
+
+    # ── 参考价位增强 (v3.0) ──────────────────────
+    enable_enhanced_reference_levels: bool = True    # 启用多来源支撑体系
+
+
+# 默认配置 (模块级单例)
+_DEFAULT_CONFIG = SetupTimingConfig()
 
 
 # ════════════════════════════════════════════════════════
@@ -67,8 +146,10 @@ class SetupSignal:
     support_zone_high: Optional[float] = None
     invalidation_level: Optional[float] = None
     resistance_1: Optional[float] = None
+    resistance_2: Optional[float] = None     # v3.0: 前高/平台上沿
     ref_reward_risk: Optional[float] = None
     level_confidence: str = "low"        # high / medium / low
+    candidate_support_levels: List[Dict[str, Any]] = field(default_factory=list)  # v3.0
 
     # 分项评分 (0~1)
     trend_score: float = 0.0
@@ -87,9 +168,24 @@ class SetupSignal:
     warnings: List[str] = field(default_factory=list)
     confidence_reasons: List[str] = field(default_factory=list)
 
+    # v3.0 新增: action cap
+    action_cap_reasons: List[str] = field(default_factory=list)
+    score_components_commentary: Dict[str, str] = field(default_factory=dict)
+
+    # v3.0 新增: Stage 1 context
+    stage1_context_used: bool = False
+    stage1_adjustment_reason: Optional[str] = None
+    final_action_before_stage1_cap: str = ""
+    final_action_after_stage1_cap: str = ""
+    high_priority_watch: bool = False
+
+    # v3.0 新增: 盘中执行预留
+    requires_intraday_confirmation: bool = False
+    intraday_check_hint: str = ""
+
     def to_dict(self) -> Dict[str, Any]:
         """序列化为 JSON 兼容 dict."""
-        return {
+        d = {
             "code": self.code,
             "name": self.name,
             "timing_score": round(self.timing_score, 2),
@@ -98,7 +194,9 @@ class SetupSignal:
             "support_zone_high": _round_price(self.support_zone_high),
             "invalidation_level": _round_price(self.invalidation_level),
             "resistance_1": _round_price(self.resistance_1),
+            "resistance_2": _round_price(self.resistance_2),
             "ref_reward_risk": round(self.ref_reward_risk, 2) if self.ref_reward_risk is not None else None,
+            "candidate_support_levels": self.candidate_support_levels,
             "level_confidence": self.level_confidence,
             "trend_score": round(self.trend_score, 4),
             "pullback_score": round(self.pullback_score, 4),
@@ -111,7 +209,16 @@ class SetupSignal:
             "reason": self.reason,
             "warnings": self.warnings,
             "confidence_reasons": self.confidence_reasons,
+            # v3.0
+            "action_cap_reasons": self.action_cap_reasons,
+            "score_components_commentary": self.score_components_commentary,
+            "stage1_context_used": self.stage1_context_used,
+            "stage1_adjustment_reason": self.stage1_adjustment_reason,
+            "high_priority_watch": self.high_priority_watch,
+            "requires_intraday_confirmation": self.requires_intraday_confirmation,
+            "intraday_check_hint": self.intraday_check_hint,
         }
+        return d
 
 
 # ════════════════════════════════════════════════════════
@@ -178,6 +285,15 @@ def _compute_atr(rows: List[Dict[str, Any]], period: int = 14) -> Optional[float
     if len(trs) < period:
         return None
     return sum(trs[-period:]) / period
+
+
+def _cap_action(current: str, cap: str) -> str:
+    """将 current action 限制到不超过 cap 的级别."""
+    cur_rank = _ACTION_RANK.get(current, 1)
+    cap_rank = _ACTION_RANK.get(cap, 1)
+    if cur_rank <= cap_rank:
+        return current
+    return cap
 
 
 # ════════════════════════════════════════════════════════
@@ -279,29 +395,50 @@ def score_pullback(
     ma20: Optional[float],
     high_20d: float,
     low_20d: float,
+    atr_pct: Optional[float] = None,
+    config: Optional[SetupTimingConfig] = None,
 ) -> float:
     """评估回踩位置——低吸的核心维度.
 
     四个子指标，钟形曲线评分:
-      - dist_ma10:      理想 -0.5%~+1%
-      - dist_ma20:      理想 0%~+5%
+      - dist_ma10:      理想 -0.5%~+1%  (width 可自适应)
+      - dist_ma20:      理想 0%~+5%     (width 可自适应)
       - range_pos:      理想 40%~65%
-      - pullback_depth: 理想 3%~8%
+      - pullback_depth: 理想 3%~8%      (center/width 可自适应)
+
+    v3.0: atr_pct 可驱动钟形曲线参数自适应，高波动票允许更宽回踩区间。
     """
+    cfg = config or _DEFAULT_CONFIG
+    use_adaptive = cfg.enable_volatility_adaptive_pullback and atr_pct is not None and atr_pct > 0
+
+    # 计算自适应参数 (atr_pct 是百分数如 5.0 表示 5%, atr_ratio 是小数 0.05)
+    if use_adaptive:
+        atr_ratio = atr_pct / 100.0
+        pb_center = _clamp(cfg.pullback_atr_multiplier * atr_ratio, cfg.pullback_min_center, cfg.pullback_max_center)
+        pb_width = _clamp(1.5 * atr_ratio, 0.05, 0.12)
+        dist_ma10_width = _clamp(0.8 * atr_ratio, 0.025, 0.06)
+        dist_ma20_width = _clamp(1.2 * atr_ratio, 0.04, 0.09)
+    else:
+        # v2.1 固定参数 (fallback)
+        pb_center = 0.05
+        pb_width = 0.06
+        dist_ma10_width = 0.03
+        dist_ma20_width = 0.05
+
     scores = []
     weights = []
 
     # 1) 距离 MA10
     if ma10 is not None and ma10 > 0:
         dist_ma10 = (close - ma10) / ma10
-        s = _bell_curve(dist_ma10, center=-0.005, width=0.03)
+        s = _bell_curve(dist_ma10, center=-0.005, width=dist_ma10_width)
         scores.append(s)
         weights.append(0.30)
 
     # 2) 距离 MA20
     if ma20 is not None and ma20 > 0:
         dist_ma20 = (close - ma20) / ma20
-        s = _bell_curve(dist_ma20, center=0.02, width=0.05)
+        s = _bell_curve(dist_ma20, center=0.02, width=dist_ma20_width)
         scores.append(s)
         weights.append(0.25)
 
@@ -316,7 +453,7 @@ def score_pullback(
     # 4) 回踩深度
     if high_20d > 0:
         pullback_depth = (high_20d - close) / high_20d
-        s = _bell_curve(pullback_depth, center=0.05, width=0.06)
+        s = _bell_curve(pullback_depth, center=pb_center, width=pb_width)
         scores.append(s)
         weights.append(0.25)
 
@@ -662,9 +799,189 @@ def compute_market_regime(
         return "neutral", MARKET_MULT_NEUTRAL
 
 
+def compute_enhanced_market_regime(
+    index_closes_20d: Optional[List[float]],
+    index_amounts_20d: Optional[List[float]] = None,
+    config: Optional["SetupTimingConfig"] = None,
+) -> Dict[str, Any]:
+    """v3.0 增强版大盘环境判断.
+
+    维度:
+      1. index_trend: 指数趋势 (bull/neutral/bear)  — 复用原有逻辑
+      2. turnover_state: 成交额状态 (expanding/neutral/shrinking)
+
+    其余维度 (breadth/sentiment/sector) 待数据源就绪后扩展。
+
+    Args:
+        index_closes_20d: 指数近20日收盘价序列（升序）
+        index_amounts_20d: 指数近20日成交额序列（升序，元）
+        config: 配置
+
+    Returns:
+        dict with index_trend, turnover_state, final_regime, multiplier
+    """
+    cfg = config or _DEFAULT_CONFIG
+
+    # 维度1: 指数趋势 (复用原有函数)
+    index_trend, _ = compute_market_regime(index_closes_20d)
+
+    # 维度2: 成交额状态
+    turnover_state = "neutral"
+    if index_amounts_20d and len(index_amounts_20d) >= 10:
+        amounts = [a for a in index_amounts_20d if a and a > 0]
+        if len(amounts) >= 10:
+            avg_all = sum(amounts) / len(amounts)
+            # 近3日均值 vs 全期均值
+            avg_recent_3 = sum(amounts[-3:]) / 3
+            ratio = avg_recent_3 / avg_all if avg_all > 0 else 1.0
+            if ratio > 1.15:
+                turnover_state = "expanding"
+            elif ratio < 0.80:
+                turnover_state = "shrinking"
+
+    # 综合判断
+    if index_trend == "bull" and turnover_state != "shrinking":
+        final_regime = "risk_on"
+        multiplier = cfg.risk_on_multiplier
+    elif index_trend == "bear":
+        final_regime = "risk_off"
+        multiplier = cfg.risk_off_multiplier
+    elif index_trend == "neutral" and turnover_state == "shrinking":
+        final_regime = "risk_off"
+        multiplier = cfg.risk_off_multiplier
+    else:
+        final_regime = "neutral"
+        multiplier = MARKET_MULT_NEUTRAL
+
+    return {
+        "index_trend": index_trend,
+        "turnover_state": turnover_state,
+        "final_regime": final_regime,
+        "multiplier": multiplier,
+    }
+
+
 # ════════════════════════════════════════════════════════
 # 参考价位计算
 # ════════════════════════════════════════════════════════
+
+def _find_swing_lows(rows: List[Dict[str, Any]], lookback: int = 2) -> List[float]:
+    """检测近20日的 swing low (局部最低点).
+
+    swing low: 某根K线的low比前后各 lookback 根K线的low都低。
+    """
+    swing_lows = []
+    for i in range(lookback, len(rows) - lookback):
+        low_i = rows[i].get("low", float("inf"))
+        is_swing = True
+        for j in range(1, lookback + 1):
+            if rows[i - j].get("low", 0) <= low_i:
+                is_swing = False
+                break
+            if rows[i + j].get("low", 0) <= low_i:
+                is_swing = False
+                break
+        if is_swing and low_i < float("inf"):
+            swing_lows.append(low_i)
+    return swing_lows
+
+
+def _find_divergence_low(rows_10d: List[Dict[str, Any]]) -> Optional[float]:
+    """找到近10日分歧日的低点 (与 score_repair 共享分歧检测逻辑)."""
+    for i in range(len(rows_10d)):
+        r = rows_10d[i]
+        h = r.get("high", 0)
+        l = r.get("low", 0)
+        c = r.get("close", 0)
+        if h > 0 and l > 0:
+            amp = (h - l) / l * 100
+            reversal = (h - c) / (h - l) if h != l else 0
+            if amp > 6.0 or (reversal > 0.45 and amp > 3.0):
+                return l
+    return None
+
+
+def _find_box_low(rows: List[Dict[str, Any]], close: float) -> Optional[float]:
+    """找箱体下沿: 近20日低点中聚集的区域.
+
+    将近20日所有low按价格排序, 寻找距离 ±1.5% 内有多个低点的聚集区。
+    """
+    lows = sorted([r.get("low", 0) for r in rows if r.get("low", 0) > 0])
+    if len(lows) < 3:
+        return None
+
+    best_cluster_center = None
+    best_count = 0
+    for i in range(len(lows)):
+        center = lows[i]
+        if center <= 0:
+            continue
+        count = sum(1 for l in lows if abs(l - center) / center <= 0.015)
+        if count > best_count:
+            best_count = count
+            best_cluster_center = center
+
+    if best_count >= 3 and best_cluster_center is not None:
+        return best_cluster_center
+    return None
+
+
+def _cluster_support_levels(
+    candidates: List[Dict[str, Any]],
+    close: float,
+) -> Tuple[Optional[float], Optional[float], str, List[Dict[str, Any]]]:
+    """从候选支撑位中找到最佳支撑聚集区.
+
+    Args:
+        candidates: [{"price": float, "source": str, "confidence": float}]
+        close: 当前收盘价
+
+    Returns:
+        (zone_low, zone_high, basis_str, sorted_candidates)
+    """
+    if not candidates:
+        return None, None, "", []
+
+    # 过滤: 支撑位应该在收盘价下方或附近 (不超过 close+3%)
+    valid = [c for c in candidates if c["price"] > 0 and c["price"] <= close * 1.03]
+    if not valid:
+        valid = candidates  # fallback: 全用
+
+    # 按价格排序
+    valid.sort(key=lambda c: c["price"])
+
+    # 给每个候选找到 ±1.5% 范围内的其他候选数量
+    best_idx = 0
+    best_score = 0.0
+    for i, c in enumerate(valid):
+        price = c["price"]
+        cluster_score = sum(
+            other["confidence"]
+            for other in valid
+            if abs(other["price"] - price) / price <= 0.015
+        )
+        # 加权: 越接近 close 越好 (但要在下方)
+        dist_pct = abs(close - price) / close if close > 0 else 0
+        proximity_bonus = max(0, 1.0 - dist_pct * 5)  # 0~20% 内有bonus
+        total = cluster_score + proximity_bonus * 0.3
+        if total > best_score:
+            best_score = total
+            best_idx = i
+
+    center = valid[best_idx]["price"]
+    # 聚集区: 中心 ±1.5%
+    cluster = [c for c in valid if abs(c["price"] - center) / center <= 0.015]
+    prices = [c["price"] for c in cluster]
+    zone_low = round(min(prices), 2)
+    zone_high = round(max(prices), 2)
+
+    # basis: 聚集区内最高置信度的来源
+    best_source = max(cluster, key=lambda c: c["confidence"])["source"]
+    sources = sorted(set(c["source"] for c in cluster))
+    basis = "+".join(sources) if len(sources) > 1 else best_source
+
+    return zone_low, zone_high, basis, valid
+
 
 def compute_reference_levels(
     close: float,
@@ -673,44 +990,123 @@ def compute_reference_levels(
     atr: Optional[float],
     high_20d: float,
     low_20d: float,
+    rows: Optional[List[Dict[str, Any]]] = None,
+    config: Optional[SetupTimingConfig] = None,
 ) -> Dict[str, Any]:
     """计算关键参考价位.
 
+    v3.0: 当 enable_enhanced_reference_levels=True 且 rows 可用时,
+    使用多来源候选支撑体系 (swing low / 分歧日低点 / 箱体下沿 / 近5日低点)。
+    否则 fallback 到 v2.1 MA10/MA20 逻辑。
+
     Returns:
         dict with support_zone_low, support_zone_high, invalidation_level,
-              resistance_1, ref_reward_risk, support_basis
+              resistance_1, resistance_2, ref_reward_risk, support_basis,
+              candidate_support_levels (v3.0)
     """
+    cfg = config or _DEFAULT_CONFIG
     result: Dict[str, Any] = {}
+    use_enhanced = cfg.enable_enhanced_reference_levels and rows and len(rows) >= 10
 
-    # 支撑区间: MA10~MA20 附近 (容差1%)
-    if ma10 is not None and ma20 is not None:
-        result["support_zone_low"] = round(min(ma10, ma20) * 0.99, 2)
-        result["support_zone_high"] = round(max(ma10, ma20) * 1.01, 2)
-        result["support_basis"] = "ma10" if abs(close - ma10) < abs(close - ma20) else "ma20"
-    elif ma20 is not None:
-        result["support_zone_low"] = round(ma20 * 0.98, 2)
-        result["support_zone_high"] = round(ma20 * 1.02, 2)
-        result["support_basis"] = "ma20"
-    elif ma10 is not None:
-        result["support_zone_low"] = round(ma10 * 0.98, 2)
-        result["support_zone_high"] = round(ma10 * 1.02, 2)
-        result["support_basis"] = "ma10"
+    if use_enhanced:
+        # 构建候选支撑位列表
+        candidates: List[Dict[str, Any]] = []
+
+        # 来源1: MA10
+        if ma10 is not None and ma10 > 0:
+            candidates.append({"price": ma10, "source": "ma10", "confidence": 0.8})
+
+        # 来源2: MA20
+        if ma20 is not None and ma20 > 0:
+            candidates.append({"price": ma20, "source": "ma20", "confidence": 0.85})
+
+        # 来源3: swing lows
+        recent_20 = rows[-20:] if len(rows) >= 20 else rows
+        swing_lows = _find_swing_lows(recent_20)
+        for sl in swing_lows:
+            candidates.append({"price": sl, "source": "swing_low", "confidence": 0.75})
+
+        # 来源4: 分歧日低点
+        rows_10d = rows[-10:] if len(rows) >= 10 else rows
+        div_low = _find_divergence_low(rows_10d)
+        if div_low is not None:
+            candidates.append({"price": div_low, "source": "divergence_low", "confidence": 0.70})
+
+        # 来源5: 近5日最低点
+        recent_5 = rows[-5:] if len(rows) >= 5 else rows
+        low_5d = min((r.get("low", float("inf")) for r in recent_5), default=None)
+        if low_5d is not None and low_5d < float("inf"):
+            candidates.append({"price": low_5d, "source": "recent_5d_low", "confidence": 0.65})
+
+        # 来源6: 箱体下沿
+        box_low = _find_box_low(recent_20, close)
+        if box_low is not None:
+            candidates.append({"price": box_low, "source": "box_low", "confidence": 0.70})
+
+        # 聚集区检测
+        zone_low, zone_high, basis, sorted_cands = _cluster_support_levels(candidates, close)
+
+        if zone_low is not None and zone_high is not None:
+            result["support_zone_low"] = zone_low
+            result["support_zone_high"] = zone_high
+            result["support_basis"] = basis
+        else:
+            # fallback to MA
+            result.update(_basic_support_zone(close, ma10, ma20, low_20d))
+
+        # 记录候选
+        result["candidate_support_levels"] = [
+            {
+                "price": round(c["price"], 2),
+                "source": c["source"],
+                "distance_to_close": round((close - c["price"]) / close, 4) if close > 0 else 0,
+                "confidence": c["confidence"],
+            }
+            for c in sorted_cands
+        ]
     else:
-        # 使用箱体低点
-        result["support_zone_low"] = round(low_20d, 2)
-        result["support_zone_high"] = round(low_20d * 1.03, 2)
-        result["support_basis"] = "box_low"
+        # v2.1 原始逻辑
+        result.update(_basic_support_zone(close, ma10, ma20, low_20d))
+        result["candidate_support_levels"] = []
 
-    # 失效位: MA20 下方 1.5 倍 ATR
+    # 失效位: 多来源取最合理
+    invalidation_candidates = []
     if ma20 is not None and atr is not None and atr > 0:
-        result["invalidation_level"] = round(ma20 - 1.5 * atr, 2)
+        invalidation_candidates.append(ma20 - 1.5 * atr)
+    if use_enhanced:
+        # swing low 下方 1×ATR
+        swing_lows = _find_swing_lows(rows[-20:] if len(rows) >= 20 else rows)
+        if swing_lows and atr is not None and atr > 0:
+            nearest_swing = min(swing_lows, key=lambda sl: abs(sl - close))
+            invalidation_candidates.append(nearest_swing - atr)
+        # 支撑聚集区下沿
+        sz_low = result.get("support_zone_low")
+        if sz_low is not None and atr is not None and atr > 0:
+            invalidation_candidates.append(sz_low - 0.5 * atr)
+
+    if invalidation_candidates:
+        # 取中位数 — 不取最高(太近)也不取最低(太远)
+        invalidation_candidates.sort()
+        mid_idx = len(invalidation_candidates) // 2
+        result["invalidation_level"] = round(invalidation_candidates[mid_idx], 2)
     elif ma20 is not None:
         result["invalidation_level"] = round(ma20 * 0.95, 2)
     else:
         result["invalidation_level"] = round(low_20d * 0.97, 2)
 
-    # 压力位: 近20日高点
+    # 压力位1: 近20日高点
     result["resistance_1"] = round(high_20d, 2)
+
+    # 压力位2 (v3.0): 前高 / 近期平台上沿
+    resistance_2 = None
+    if use_enhanced and rows:
+        recent_40 = rows[-40:] if len(rows) >= 40 else rows
+        highs_40 = [r.get("high", 0) for r in recent_40]
+        if highs_40:
+            max_40 = max(highs_40)
+            if max_40 > high_20d * 1.01:  # 只有明显高于20日高点才有意义
+                resistance_2 = round(max_40, 2)
+    result["resistance_2"] = resistance_2
 
     # 参考盈亏比
     inv = result.get("invalidation_level")
@@ -722,6 +1118,39 @@ def compute_reference_levels(
         result["ref_reward_risk"] = 0.0
 
     return result
+
+
+def _basic_support_zone(
+    close: float,
+    ma10: Optional[float],
+    ma20: Optional[float],
+    low_20d: float,
+) -> Dict[str, Any]:
+    """v2.1 原始支撑区间计算 (fallback)."""
+    if ma10 is not None and ma20 is not None:
+        return {
+            "support_zone_low": round(min(ma10, ma20) * 0.99, 2),
+            "support_zone_high": round(max(ma10, ma20) * 1.01, 2),
+            "support_basis": "ma10" if abs(close - ma10) < abs(close - ma20) else "ma20",
+        }
+    elif ma20 is not None:
+        return {
+            "support_zone_low": round(ma20 * 0.98, 2),
+            "support_zone_high": round(ma20 * 1.02, 2),
+            "support_basis": "ma20",
+        }
+    elif ma10 is not None:
+        return {
+            "support_zone_low": round(ma10 * 0.98, 2),
+            "support_zone_high": round(ma10 * 1.02, 2),
+            "support_basis": "ma10",
+        }
+    else:
+        return {
+            "support_zone_low": round(low_20d, 2),
+            "support_zone_high": round(low_20d * 1.03, 2),
+            "support_basis": "box_low",
+        }
 
 
 # ════════════════════════════════════════════════════════
@@ -812,11 +1241,240 @@ def map_action(
 
 
 # ════════════════════════════════════════════════════════
-# 理由生成
+# Action Cap 体系 (v3.0)
+# ════════════════════════════════════════════════════════
+
+def apply_action_caps(
+    signal: SetupSignal,
+    metrics: Dict[str, Any],
+    upper_reversal_count_5d: Optional[int],
+    limit_board_count_5d: Optional[int],
+    config: Optional[SetupTimingConfig] = None,
+) -> Tuple[str, List[str]]:
+    """应用 action cap 硬规则，限制高风险结构的 action 上限.
+
+    不修改 timing_score，只限制最终 action。
+    所有触发的 cap 原因记录到 cap_reasons。
+
+    Args:
+        signal: 已完成评分和初始 action 映射的 SetupSignal
+        metrics: _extract_eod_metrics 返回的中间指标
+        upper_reversal_count_5d: 近5日上影线天数
+        limit_board_count_5d: 近5日一字板天数
+        config: 配置
+
+    Returns:
+        (capped_action, cap_reasons)
+    """
+    cfg = config or _DEFAULT_CONFIG
+    if not cfg.enable_action_caps:
+        return signal.action, []
+
+    action = signal.action
+    cap_reasons: List[str] = []
+
+    # ── 规则 1-2: risk_score 过低 ──────────────────────
+    if signal.risk_score < cfg.cap_min_risk_score_critical:
+        new = _cap_action(action, "avoid_chase")
+        if new != action:
+            cap_reasons.append(f"risk_score={signal.risk_score:.2f}<{cfg.cap_min_risk_score_critical}→avoid_chase")
+            action = new
+    elif signal.risk_score < cfg.cap_min_risk_score_for_ready:
+        new = _cap_action(action, "wait")
+        if new != action:
+            cap_reasons.append(f"risk_score={signal.risk_score:.2f}<{cfg.cap_min_risk_score_for_ready}→最高wait")
+            action = new
+
+    # ── 规则 3-4: level_confidence 过低 ────────────────
+    if signal.level_confidence == "low":
+        rr = signal.ref_reward_risk
+        if rr is not None and rr < cfg.cap_min_reward_risk_for_ready:
+            new = _cap_action(action, "wait")
+            if new != action:
+                cap_reasons.append(f"level_confidence=low且ref_rr={rr:.2f}<{cfg.cap_min_reward_risk_for_ready}→最高wait")
+                action = new
+        else:
+            new = _cap_action(action, "watch")
+            if new != action:
+                cap_reasons.append("level_confidence=low→最高watch")
+                action = new
+
+    # ── 规则 5-6: 盈亏比不足 ──────────────────────────
+    rr = signal.ref_reward_risk
+    if rr is not None:
+        if rr < cfg.cap_min_reward_risk_critical:
+            new = _cap_action(action, "wait")
+            if new != action:
+                cap_reasons.append(f"ref_reward_risk={rr:.2f}<{cfg.cap_min_reward_risk_critical}→最高wait")
+                action = new
+        elif rr < cfg.cap_min_reward_risk_for_ready:
+            new = _cap_action(action, "watch")
+            if new != action:
+                cap_reasons.append(f"ref_reward_risk={rr:.2f}<{cfg.cap_min_reward_risk_for_ready}→最高watch")
+                action = new
+
+    # ── 规则 7-8: 价格远离 MA20 ──────────────────────
+    ma20 = metrics.get("ma20")
+    close = metrics.get("close", 0)
+    if ma20 is not None and ma20 > 0 and close > 0:
+        dist_ma20_pct = abs(close - ma20) / ma20
+        if dist_ma20_pct > cfg.cap_max_dist_ma20_critical:
+            new = _cap_action(action, "wait")
+            if new != action:
+                cap_reasons.append(f"距MA20={dist_ma20_pct:.1%}>{cfg.cap_max_dist_ma20_critical:.0%}→最高wait")
+                action = new
+        elif dist_ma20_pct > cfg.cap_max_dist_ma20_for_ready:
+            new = _cap_action(action, "watch")
+            if new != action:
+                cap_reasons.append(f"距MA20={dist_ma20_pct:.1%}>{cfg.cap_max_dist_ma20_for_ready:.0%}→最高watch")
+                action = new
+
+    # ── 规则 9: 高波动 + 高回撤 ──────────────────────
+    atr_pct = metrics.get("atr_pct")
+    max_dd = metrics.get("max_drawdown_5d")
+    if atr_pct is not None and max_dd is not None:
+        if atr_pct > cfg.cap_atr_drawdown_atr_threshold and abs(max_dd) > cfg.cap_atr_drawdown_dd_threshold:
+            new = _cap_action(action, "wait")
+            if new != action:
+                cap_reasons.append(
+                    f"ATR%={atr_pct:.1f}%>{cfg.cap_atr_drawdown_atr_threshold}%"
+                    f"且回撤={abs(max_dd):.1f}%>{cfg.cap_atr_drawdown_dd_threshold}%→最高wait"
+                )
+                action = new
+
+    # ── 规则 10: ATR% 极高 ───────────────────────────
+    if atr_pct is not None and atr_pct > cfg.cap_max_atr_pct_for_ready:
+        new = _cap_action(action, "watch")
+        if new != action:
+            cap_reasons.append(f"ATR%={atr_pct:.1f}%>{cfg.cap_max_atr_pct_for_ready}%→最高watch")
+            action = new
+
+    # ── 规则 11: 上影线密集 ──────────────────────────
+    if upper_reversal_count_5d is not None and upper_reversal_count_5d > cfg.cap_max_upper_shadow_days:
+        new = _cap_action(action, "wait")
+        if new != action:
+            cap_reasons.append(
+                f"近5日上影线={upper_reversal_count_5d}天>{cfg.cap_max_upper_shadow_days}天→最高wait"
+            )
+            action = new
+
+    # ── 规则 12-13: 弱市环境 ─────────────────────────
+    if signal.market_regime == "bear":
+        if signal.timing_score < cfg.cap_bear_ready_threshold and action == "setup_ready":
+            cap_reasons.append(
+                f"bear市且timing={signal.timing_score:.1f}<{cfg.cap_bear_ready_threshold}→不允许setup_ready"
+            )
+            action = _cap_action(action, "watch")
+        if signal.risk_score < cfg.cap_bear_min_risk_score:
+            new = _cap_action(action, "wait")
+            if new != action:
+                cap_reasons.append(
+                    f"bear市且risk_score={signal.risk_score:.2f}<{cfg.cap_bear_min_risk_score}→最高wait"
+                )
+                action = new
+
+    # ── 规则 14: 近期一字板频繁 ──────────────────────
+    if limit_board_count_5d is not None and limit_board_count_5d > cfg.cap_max_limit_board_days:
+        new = _cap_action(action, "watch")
+        if new != action:
+            cap_reasons.append(
+                f"近5日一字板={limit_board_count_5d}天>{cfg.cap_max_limit_board_days}天→最高watch"
+            )
+            action = new
+
+    return action, cap_reasons
+
+
+# ════════════════════════════════════════════════════════
+# Stage 1 Context 联动 (v3.0)
+# ════════════════════════════════════════════════════════
+
+def apply_stage1_context(
+    signal: SetupSignal,
+    stage1_context: Optional[Dict[str, Any]],
+    config: Optional[SetupTimingConfig] = None,
+) -> Tuple[str, Optional[str], bool]:
+    """根据 Stage 1 四轴分数调整 action.
+
+    Args:
+        signal: 已完成 action cap 的 SetupSignal
+        stage1_context: Stage 1 上下文, 包含:
+            - hot_theme_score, trend_flow_score, liquidity_execution_score,
+              risk_control_score, total_score, stage1_rank_pctile (0~1, 越大越靠前)
+        config: 配置
+
+    Returns:
+        (adjusted_action, adjustment_reason, is_high_priority)
+    """
+    cfg = config or _DEFAULT_CONFIG
+    if not cfg.enable_stage1_context or not stage1_context:
+        return signal.action, None, False
+
+    action = signal.action
+    reasons: List[str] = []
+    is_high_priority = False
+
+    ht = stage1_context.get("hot_theme_score")
+    le = stage1_context.get("liquidity_execution_score")
+    rc = stage1_context.get("risk_control_score")
+    rank_pctile = stage1_context.get("stage1_rank_pctile")  # 0~1, 越大越靠前
+
+    # 主题强度联动
+    if ht is not None and ht < cfg.min_hot_theme_for_ready:
+        if action == "setup_ready":
+            action = "watch"
+            reasons.append(f"hot_theme={ht:.2f}<{cfg.min_hot_theme_for_ready}→降为watch")
+
+    # high_priority 标记
+    if (
+        ht is not None and ht >= cfg.high_priority_hot_theme
+        and signal.timing_score >= cfg.high_priority_timing
+    ):
+        is_high_priority = True
+
+    # 流动性联动
+    if le is not None:
+        if le < cfg.min_liquidity_critical:
+            new = _cap_action(action, "wait")
+            if new != action:
+                reasons.append(f"liquidity={le:.2f}<{cfg.min_liquidity_critical}→最高wait")
+                action = new
+        elif le < cfg.min_liquidity_for_ready:
+            if action == "setup_ready":
+                action = "watch"
+                reasons.append(f"liquidity={le:.2f}<{cfg.min_liquidity_for_ready}→降为watch")
+
+    # 风控联动
+    if rc is not None:
+        if rc < cfg.min_stage1_risk_critical:
+            new = _cap_action(action, "wait")
+            if new != action:
+                reasons.append(f"stage1_risk={rc:.2f}<{cfg.min_stage1_risk_critical}→最高wait")
+                action = new
+        elif rc < cfg.min_stage1_risk_for_ready:
+            if action == "setup_ready":
+                action = "watch"
+                reasons.append(f"stage1_risk={rc:.2f}<{cfg.min_stage1_risk_for_ready}→降为watch")
+
+    # 总分排序联动: 后50%需要更高timing才能setup_ready
+    if rank_pctile is not None and rank_pctile < 0.5:
+        if action == "setup_ready" and signal.timing_score < cfg.stage1_bottom_pctile_timing:
+            action = "watch"
+            reasons.append(
+                f"stage1排名后{(1-rank_pctile)*100:.0f}%"
+                f"且timing={signal.timing_score:.1f}<{cfg.stage1_bottom_pctile_timing}→降为watch"
+            )
+
+    reason_str = "; ".join(reasons) if reasons else None
+    return action, reason_str, is_high_priority
+
+
+# ════════════════════════════════════════════════════════
+# 理由生成 (v3.0 增强)
 # ════════════════════════════════════════════════════════
 
 def generate_reason(signal: SetupSignal) -> str:
-    """生成一句话理由."""
+    """生成多维度理由描述."""
     parts = []
 
     # 趋势描述
@@ -825,7 +1483,7 @@ def generate_reason(signal: SetupSignal) -> str:
     elif signal.trend_score >= 0.4:
         parts.append("趋势偏多")
     else:
-        parts.append("趋势偏弱")
+        parts.append("趋势走弱")
 
     # 回踩描述
     if signal.pullback_score >= 0.7:
@@ -833,37 +1491,167 @@ def generate_reason(signal: SetupSignal) -> str:
     elif signal.pullback_score >= 0.4:
         parts.append("回踩接近")
     else:
-        parts.append("位置偏高")
+        parts.append("位置偏高或回撤过深")
 
     # 量价描述
     if signal.volume_score >= 0.7:
-        parts.append("缩量确认")
+        parts.append("回调缩量确认")
+    elif signal.volume_score >= 0.4:
+        parts.append("量能尚可")
     elif signal.volume_score < 0.3:
-        parts.append("量能异常")
+        parts.append("下跌放量需谨慎")
+
+    # 修复描述
+    if signal.repair_score >= 0.7:
+        parts.append("分歧后修复")
+    elif signal.repair_score <= 0.3:
+        parts.append("分歧后未修复")
 
     # 风险描述
-    if signal.risk_score < 0.4:
+    if signal.risk_score < 0.3:
         parts.append("风险偏高")
+    elif signal.risk_score < 0.5:
+        parts.append("波动较大")
 
     return "，".join(parts)
 
 
+def generate_score_commentary(signal: SetupSignal) -> Dict[str, str]:
+    """为每个评分维度生成一句话解释."""
+    commentary: Dict[str, str] = {}
+
+    # 趋势
+    if signal.trend_score >= 0.7:
+        commentary["trend"] = "均线多头排列，趋势向上"
+    elif signal.trend_score >= 0.5:
+        commentary["trend"] = "趋势偏多但正在回踩"
+    elif signal.trend_score >= 0.3:
+        commentary["trend"] = "趋势转弱，均线开始走平"
+    else:
+        commentary["trend"] = "趋势走弱，均线空头排列"
+
+    # 回踩
+    if signal.pullback_score >= 0.7:
+        commentary["pullback"] = "回踩到MA10/MA20附近，位置理想"
+    elif signal.pullback_score >= 0.5:
+        commentary["pullback"] = "回踩接近关键支撑，但未到最佳区域"
+    elif signal.pullback_score >= 0.3:
+        commentary["pullback"] = "位置偏高或回撤过深"
+    else:
+        commentary["pullback"] = "远离理想回踩区域"
+
+    # 量价
+    if signal.volume_score >= 0.7:
+        commentary["volume"] = "回调缩量明显，量价配合良好"
+    elif signal.volume_score >= 0.5:
+        commentary["volume"] = "量能尚可，无明显异常"
+    elif signal.volume_score >= 0.3:
+        commentary["volume"] = "量能偏弱或下跌放量"
+    else:
+        commentary["volume"] = "量能异常，下跌放量或底部无承接"
+
+    # 修复
+    if signal.repair_score >= 0.7:
+        commentary["repair"] = "分歧后缩量守住支撑并出现修复阳线"
+    elif signal.repair_score > 0.5:
+        commentary["repair"] = "有分歧结构但修复尚不充分"
+    elif signal.repair_score < 0.3 and signal.repair_score != 0.5:
+        commentary["repair"] = "分歧后未能守住关键支撑"
+    else:
+        commentary["repair"] = "无明显分歧结构"
+
+    # 风险
+    if signal.risk_score >= 0.7:
+        commentary["risk"] = "波动适中，风险可控"
+    elif signal.risk_score >= 0.4:
+        commentary["risk"] = "波动较大或有上影线"
+    else:
+        commentary["risk"] = "高波动/大回撤/上影线密集，风险偏高"
+
+    return commentary
+
+
 # ════════════════════════════════════════════════════════
-# 生成警告
+# 生成警告 (v3.0 增强)
 # ════════════════════════════════════════════════════════
 
-def generate_warnings(signal: SetupSignal) -> List[str]:
-    """生成风险提示列表."""
+def generate_warnings(
+    signal: SetupSignal,
+    metrics: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """生成风险提示列表.
+
+    v3.0: 增加更具体的警告内容，包括 action cap 原因。
+    """
     warns = []
     if signal.risk_score < 0.3:
-        warns.append("风险评分偏低，注意控制仓位")
+        warns.append(f"风险评分偏低({signal.risk_score:.2f})，注意控制仓位")
     if signal.level_confidence == "low":
         warns.append("参考价位置信度低，仅供参考")
     if signal.market_regime == "bear":
         warns.append("大盘环境偏弱，谨慎操作")
     if signal.ref_reward_risk is not None and signal.ref_reward_risk < 1.0:
-        warns.append("盈亏比不足1:1")
+        warns.append(f"盈亏比不足1:1(当前{signal.ref_reward_risk:.2f})")
+
+    # v3.0 新增: 基于 metrics 的具体警告
+    if metrics:
+        atr_pct = metrics.get("atr_pct")
+        if atr_pct is not None and atr_pct > 8.0:
+            warns.append(f"ATR%={atr_pct:.1f}%，波动较大")
+        dist_ma20 = None
+        ma20 = metrics.get("ma20")
+        close = metrics.get("close", 0)
+        if ma20 and ma20 > 0 and close > 0:
+            dist_ma20 = abs(close - ma20) / ma20
+            if dist_ma20 > 0.12:
+                warns.append(f"距MA20={dist_ma20:.1%}，偏离较远不适合低吸")
+        max_dd = metrics.get("max_drawdown_5d")
+        if max_dd is not None and abs(max_dd) > 10.0:
+            warns.append(f"近5日最大回撤={abs(max_dd):.1f}%")
+
+    # action cap 原因合并到 warnings
+    for reason in signal.action_cap_reasons:
+        warns.append(f"[action cap] {reason}")
+
+    # stage1 调整原因
+    if signal.stage1_adjustment_reason:
+        warns.append(f"[stage1联动] {signal.stage1_adjustment_reason}")
+
     return warns
+
+
+# ════════════════════════════════════════════════════════
+# 盘中执行提示 (v3.0)
+# ════════════════════════════════════════════════════════
+
+def generate_intraday_hint(signal: SetupSignal) -> Tuple[bool, str]:
+    """生成盘中执行确认提示.
+
+    仅对 setup_ready 和 watch 级别生成提示。
+    """
+    if signal.action == "avoid_chase":
+        return False, ""
+    if signal.action == "wait":
+        return False, ""
+
+    hints = []
+    if signal.action == "setup_ready":
+        if signal.risk_score < 0.5:
+            hints.append("需确认盘中波动可控")
+        if signal.pullback_score >= 0.6:
+            hints.append("需确认回踩支撑不破")
+        else:
+            hints.append("需观察是否企稳")
+        if signal.volume_score >= 0.6:
+            hints.append("需确认放量修复")
+        else:
+            hints.append("需观察量能配合")
+        hints.append("不适合竞价追高")
+    elif signal.action == "watch":
+        hints.append("需观察是否回踩到位")
+        hints.append("需确认量价配合")
+
+    return True, "；".join(hints)
 
 
 # ════════════════════════════════════════════════════════
@@ -1015,6 +1803,8 @@ def evaluate_setup_timing(
     is_watch_only: bool = False,
     market_regime: str = "neutral",
     market_multiplier: float = 1.0,
+    stage1_context: Optional[Dict[str, Any]] = None,
+    config: Optional[SetupTimingConfig] = None,
 ) -> SetupSignal:
     """评估单只股票的观察时机.
 
@@ -1029,10 +1819,13 @@ def evaluate_setup_timing(
         is_watch_only: 是否为 watch_only 候选
         market_regime: 大盘环境 (来自 compute_market_regime)
         market_multiplier: 大盘乘数
+        stage1_context: Stage 1 四轴分数 (v3.0)
+        config: SetupTimingConfig (v3.0)
 
     Returns:
         SetupSignal
     """
+    cfg = config or _DEFAULT_CONFIG
     signal = SetupSignal(code=code, name=name)
     signal.market_regime = market_regime
     signal.market_multiplier = market_multiplier
@@ -1070,6 +1863,8 @@ def evaluate_setup_timing(
         ma20=metrics["ma20"],
         high_20d=metrics["high_20d"],
         low_20d=metrics["low_20d"],
+        atr_pct=metrics["atr_pct"],
+        config=cfg,
     )
 
     signal.volume_score = score_volume(
@@ -1101,7 +1896,7 @@ def evaluate_setup_timing(
 
     signal.timing_score = _clamp(raw_score * market_multiplier, 0.0, 100.0)
 
-    # ── 动作映射 ────────────────────────────────────────
+    # ── 动作映射 (基础) ─────────────────────────────────
 
     signal.action = map_action(
         timing_score=signal.timing_score,
@@ -1118,13 +1913,17 @@ def evaluate_setup_timing(
         atr=metrics["atr"],
         high_20d=metrics["high_20d"],
         low_20d=metrics["low_20d"],
+        rows=eod_rows,
+        config=cfg,
     )
     signal.support_zone_low = ref_levels.get("support_zone_low")
     signal.support_zone_high = ref_levels.get("support_zone_high")
     signal.invalidation_level = ref_levels.get("invalidation_level")
     signal.resistance_1 = ref_levels.get("resistance_1")
+    signal.resistance_2 = ref_levels.get("resistance_2")
     signal.ref_reward_risk = ref_levels.get("ref_reward_risk")
     signal.support_basis = ref_levels.get("support_basis", "")
+    signal.candidate_support_levels = ref_levels.get("candidate_support_levels", [])
 
     # ── 置信度 ──────────────────────────────────────────
 
@@ -1141,10 +1940,47 @@ def evaluate_setup_timing(
     signal.level_confidence = confidence
     signal.confidence_reasons = conf_reasons
 
+    # ── Action Cap (v3.0) ──────────────────────────────
+
+    capped_action, cap_reasons = apply_action_caps(
+        signal=signal,
+        metrics=metrics,
+        upper_reversal_count_5d=upper_reversal_count_5d,
+        limit_board_count_5d=limit_board_count_5d,
+        config=cfg,
+    )
+    signal.action = capped_action
+    signal.action_cap_reasons = cap_reasons
+
+    # ── Stage 1 Context (v3.0) ─────────────────────────
+
+    signal.final_action_before_stage1_cap = signal.action
+    if stage1_context and cfg.enable_stage1_context:
+        signal.stage1_context_used = True
+        adjusted_action, adj_reason, high_pri = apply_stage1_context(
+            signal=signal,
+            stage1_context=stage1_context,
+            config=cfg,
+        )
+        signal.action = adjusted_action
+        signal.stage1_adjustment_reason = adj_reason
+        signal.high_priority_watch = high_pri
+    signal.final_action_after_stage1_cap = signal.action
+
+    # ── 评分维度解释 (v3.0) ────────────────────────────
+
+    signal.score_components_commentary = generate_score_commentary(signal)
+
+    # ── 盘中执行提示 (v3.0) ────────────────────────────
+
+    needs_confirm, hint = generate_intraday_hint(signal)
+    signal.requires_intraday_confirmation = needs_confirm
+    signal.intraday_check_hint = hint
+
     # ── 理由 + 警告 ────────────────────────────────────
 
     signal.reason = generate_reason(signal)
-    signal.warnings = generate_warnings(signal)
+    signal.warnings = generate_warnings(signal, metrics=metrics)
 
     return signal
 
@@ -1159,6 +1995,8 @@ def run_setup_timing(
     trade_cal: Any,
     trade_date_str: str,
     index_closes_20d: Optional[List[float]] = None,
+    index_amounts_20d: Optional[List[float]] = None,
+    config: Optional[SetupTimingConfig] = None,
 ) -> List[SetupSignal]:
     """对 tradeable 的 details 批量运行观察时机评估.
 
@@ -1168,15 +2006,39 @@ def run_setup_timing(
         trade_cal: TradeCalendar 实例
         trade_date_str: 运行日期 (YYYY-MM-DD)
         index_closes_20d: 指数近20日收盘价序列
+        index_amounts_20d: 指数近20日成交额序列 (v3.0, 元)
+        config: SetupTimingConfig (v3.0)
 
     Returns:
         List[SetupSignal]
     """
     import datetime as _dt
 
+    cfg = config or _DEFAULT_CONFIG
+
     # 大盘环境
-    regime, multiplier = compute_market_regime(index_closes_20d)
-    logger.info("[setup_timing] 大盘环境: %s (乘数=%.2f)", regime, multiplier)
+    if cfg.enable_enhanced_market_regime:
+        regime_detail = compute_enhanced_market_regime(
+            index_closes_20d, index_amounts_20d, config=cfg,
+        )
+        regime = regime_detail["final_regime"]
+        multiplier = regime_detail["multiplier"]
+        logger.info(
+            "[setup_timing] 增强大盘环境: %s (乘数=%.2f) index_trend=%s turnover=%s",
+            regime, multiplier, regime_detail["index_trend"], regime_detail["turnover_state"],
+        )
+    else:
+        regime, multiplier = compute_market_regime(index_closes_20d)
+        logger.info("[setup_timing] 大盘环境: %s (乘数=%.2f)", regime, multiplier)
+
+    # v3.0: 预计算 Stage 1 排名百分位 (用于 stage1_context 联动)
+    total_scores = []
+    for d in details:
+        ts = getattr(d, "total_score", None)
+        if ts is not None and isinstance(ts, (int, float)):
+            total_scores.append(ts)
+    total_scores.sort()
+    total_count = len(total_scores)
 
     signals: List[SetupSignal] = []
     trade_date = _dt.date.fromisoformat(trade_date_str)
@@ -1211,6 +2073,30 @@ def run_setup_timing(
 
             is_watch_only = getattr(detail, "pass_stage1_watch", False) and not getattr(detail, "pass_stage1", False)
 
+            # v3.0: 构建 stage1_context
+            stage1_ctx = None
+            if cfg.enable_stage1_context:
+                ts_val = getattr(detail, "total_score", None)
+                rank_pctile = None
+                if ts_val is not None and isinstance(ts_val, (int, float)) and total_count > 0:
+                    # 用 bisect 计算百分位 (越大越靠前)
+                    import bisect
+                    pos = bisect.bisect_right(total_scores, ts_val)
+                    rank_pctile = pos / total_count
+
+                def _safe_score(val: Any) -> Any:
+                    """Only pass through numeric scores, not MagicMock etc."""
+                    return val if isinstance(val, (int, float)) else None
+
+                stage1_ctx = {
+                    "hot_theme_score": _safe_score(getattr(detail, "hot_theme_score", None)),
+                    "trend_flow_score": _safe_score(getattr(detail, "trend_flow_score", None)),
+                    "liquidity_execution_score": _safe_score(getattr(detail, "liquidity_execution_score", None)),
+                    "risk_control_score": _safe_score(getattr(detail, "risk_control_score", None)),
+                    "total_score": ts_val if isinstance(ts_val, (int, float)) else None,
+                    "stage1_rank_pctile": rank_pctile,
+                }
+
             signal = evaluate_setup_timing(
                 code=detail.code,
                 name=getattr(detail, "name", ""),
@@ -1222,6 +2108,8 @@ def run_setup_timing(
                 is_watch_only=is_watch_only,
                 market_regime=regime,
                 market_multiplier=multiplier,
+                stage1_context=stage1_ctx,
+                config=cfg,
             )
             signals.append(signal)
 

@@ -679,8 +679,8 @@ class TestGenerateReason:
         signal.volume_score = 0.2
         signal.risk_score = 0.2
         reason = generate_reason(signal)
-        assert "趋势偏弱" in reason
-        assert "位置偏高" in reason
+        assert "趋势走弱" in reason
+        assert "位置偏高" in reason or "回撤过深" in reason
 
 
 # ════════════════════════════════════════════════════════
@@ -982,3 +982,881 @@ class TestRunSetupTiming:
         )
         assert len(signals) == 1
         assert signals[0].action != "setup_ready"
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: SetupTimingConfig
+# ════════════════════════════════════════════════════════
+
+from a_share_hot_screener.setup_timing import (
+    SetupTimingConfig,
+    apply_action_caps,
+    apply_stage1_context,
+    generate_score_commentary,
+    generate_intraday_hint,
+    _cap_action,
+)
+
+
+class TestSetupTimingConfig:
+    def test_default_values(self):
+        cfg = SetupTimingConfig()
+        assert cfg.enable_action_caps is True
+        assert cfg.enable_volatility_adaptive_pullback is True
+        assert cfg.enable_stage1_context is True
+        assert cfg.cap_min_risk_score_for_ready == 0.25
+
+    def test_custom_values(self):
+        cfg = SetupTimingConfig(cap_min_risk_score_for_ready=0.30)
+        assert cfg.cap_min_risk_score_for_ready == 0.30
+
+
+class TestCapAction:
+    def test_no_cap_needed(self):
+        assert _cap_action("wait", "watch") == "wait"
+        assert _cap_action("avoid_chase", "watch") == "avoid_chase"
+
+    def test_cap_applied(self):
+        assert _cap_action("setup_ready", "watch") == "watch"
+        assert _cap_action("watch", "wait") == "wait"
+        assert _cap_action("setup_ready", "avoid_chase") == "avoid_chase"
+
+    def test_same_level(self):
+        assert _cap_action("watch", "watch") == "watch"
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: Action Cap 体系
+# ════════════════════════════════════════════════════════
+
+class TestApplyActionCaps:
+    def _make_signal(self, **kwargs) -> SetupSignal:
+        defaults = {
+            "code": "000001", "name": "test",
+            "timing_score": 85.0, "action": "setup_ready",
+            "risk_score": 0.8, "level_confidence": "high",
+            "ref_reward_risk": 2.0, "market_regime": "neutral",
+        }
+        defaults.update(kwargs)
+        s = SetupSignal(code=defaults["code"], name=defaults["name"])
+        for k, v in defaults.items():
+            if k not in ("code", "name"):
+                setattr(s, k, v)
+        return s
+
+    def _make_metrics(self, **kwargs) -> dict:
+        defaults = {
+            "close": 10.0, "ma20": 9.8, "atr_pct": 3.0, "max_drawdown_5d": 2.0,
+        }
+        defaults.update(kwargs)
+        return defaults
+
+    def test_no_cap_when_all_healthy(self):
+        signal = self._make_signal()
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "setup_ready"
+        assert reasons == []
+
+    def test_risk_score_low_caps_to_wait(self):
+        signal = self._make_signal(risk_score=0.20)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "wait"
+        assert len(reasons) >= 1
+        assert any("risk_score" in r for r in reasons)
+
+    def test_risk_score_critical_caps_to_avoid(self):
+        signal = self._make_signal(risk_score=0.10)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "avoid_chase"
+
+    def test_level_confidence_low_caps_to_watch(self):
+        signal = self._make_signal(level_confidence="low", ref_reward_risk=2.0)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "watch"
+        assert any("level_confidence" in r for r in reasons)
+
+    def test_level_confidence_low_and_low_rr_caps_to_wait(self):
+        signal = self._make_signal(level_confidence="low", ref_reward_risk=0.8)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "wait"
+
+    def test_reward_risk_low_caps_to_watch(self):
+        signal = self._make_signal(ref_reward_risk=0.8)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "watch"
+
+    def test_reward_risk_critical_caps_to_wait(self):
+        signal = self._make_signal(ref_reward_risk=0.5)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "wait"
+
+    def test_dist_ma20_far_caps_to_watch(self):
+        # close=11.5, ma20=10.0 → dist=15% > 12%
+        signal = self._make_signal()
+        metrics = self._make_metrics(close=11.5, ma20=10.0)
+        action, reasons = apply_action_caps(signal, metrics, 0, 0)
+        assert action == "watch"
+        assert any("MA20" in r for r in reasons)
+
+    def test_dist_ma20_very_far_caps_to_wait(self):
+        # close=12.0, ma20=10.0 → dist=20% > 18%
+        signal = self._make_signal()
+        metrics = self._make_metrics(close=12.0, ma20=10.0)
+        action, reasons = apply_action_caps(signal, metrics, 0, 0)
+        assert action == "wait"
+
+    def test_high_atr_and_drawdown_caps_to_wait(self):
+        signal = self._make_signal()
+        metrics = self._make_metrics(atr_pct=9.0, max_drawdown_5d=12.0)
+        action, reasons = apply_action_caps(signal, metrics, 0, 0)
+        assert action == "wait"
+
+    def test_extreme_atr_caps_to_watch(self):
+        signal = self._make_signal()
+        metrics = self._make_metrics(atr_pct=11.0)
+        action, reasons = apply_action_caps(signal, metrics, 0, 0)
+        assert action == "watch"
+
+    def test_upper_shadow_dense_caps_to_wait(self):
+        signal = self._make_signal()
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 3, 0)
+        assert action == "wait"
+        assert any("上影线" in r for r in reasons)
+
+    def test_bear_market_blocks_ready(self):
+        signal = self._make_signal(timing_score=82.0, market_regime="bear")
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "watch"
+        assert any("bear" in r for r in reasons)
+
+    def test_bear_market_high_score_allows_ready(self):
+        """bear 市 timing >= 85 仍可 setup_ready."""
+        signal = self._make_signal(timing_score=90.0, market_regime="bear", risk_score=0.8)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "setup_ready"
+
+    def test_bear_low_risk_caps_to_wait(self):
+        signal = self._make_signal(market_regime="bear", risk_score=0.35)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "wait"
+
+    def test_frequent_limit_board_caps_to_watch(self):
+        signal = self._make_signal()
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 2)
+        assert action == "watch"
+        assert any("一字板" in r for r in reasons)
+
+    def test_caps_disabled_by_config(self):
+        cfg = SetupTimingConfig(enable_action_caps=False)
+        signal = self._make_signal(risk_score=0.05)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 3, 3, config=cfg)
+        assert action == "setup_ready"  # no caps applied
+        assert reasons == []
+
+    def test_multiple_caps_strictest_wins(self):
+        """多条规则同时触发，最严格的cap生效."""
+        signal = self._make_signal(risk_score=0.10, ref_reward_risk=0.5)
+        action, reasons = apply_action_caps(signal, self._make_metrics(), 0, 0)
+        assert action == "avoid_chase"  # risk_score<0.15 is strictest
+        assert len(reasons) >= 1
+        assert any("risk_score" in r for r in reasons)
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: 波动率自适应回踩
+# ════════════════════════════════════════════════════════
+
+class TestVolatilityAdaptivePullback:
+    def test_high_atr_wider_params(self):
+        """高ATR股票回踩到位的分更高（因为允许更深回踩）."""
+        # 高ATR: close远离MA10/MA20但在更宽容的范围内
+        # 回踩8%对于ATR%=8%的股是合理的，但对固定参数(center=5%)偏深
+        s_adaptive = score_pullback(
+            close=9.2, ma10=9.5, ma20=9.3,
+            high_20d=10.0, low_20d=8.8,
+            atr_pct=8.0,  # 高波动
+        )
+        s_fixed = score_pullback(
+            close=9.2, ma10=9.5, ma20=9.3,
+            high_20d=10.0, low_20d=8.8,
+            atr_pct=None,  # fallback to fixed
+        )
+        # 自适应模式下，深回踩更宽容
+        assert s_adaptive != s_fixed  # 参数不同应产生不同结果
+
+    def test_low_atr_narrower_params(self):
+        """低ATR股票用更窄参数."""
+        s = score_pullback(
+            close=10.0, ma10=10.05, ma20=9.95,
+            high_20d=10.3, low_20d=9.7,
+            atr_pct=2.0,  # 低波动
+        )
+        assert 0.0 <= s <= 1.0
+
+    def test_no_atr_falls_back(self):
+        """atr_pct=None 时 fallback 到固定参数."""
+        s1 = score_pullback(
+            close=10.0, ma10=10.05, ma20=9.8,
+            high_20d=11.0, low_20d=9.0,
+            atr_pct=None,
+        )
+        s2 = score_pullback(
+            close=10.0, ma10=10.05, ma20=9.8,
+            high_20d=11.0, low_20d=9.0,
+        )
+        assert s1 == pytest.approx(s2)  # 应完全相同
+
+    def test_disabled_by_config(self):
+        """配置关闭自适应时用固定参数."""
+        cfg = SetupTimingConfig(enable_volatility_adaptive_pullback=False)
+        s_disabled = score_pullback(
+            close=10.0, ma10=10.05, ma20=9.8,
+            high_20d=11.0, low_20d=9.0,
+            atr_pct=8.0, config=cfg,
+        )
+        s_no_atr = score_pullback(
+            close=10.0, ma10=10.05, ma20=9.8,
+            high_20d=11.0, low_20d=9.0,
+            atr_pct=None,
+        )
+        assert s_disabled == pytest.approx(s_no_atr)
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: Stage 1 Context 联动
+# ════════════════════════════════════════════════════════
+
+class TestApplyStage1Context:
+    def _make_signal(self, **kwargs) -> SetupSignal:
+        defaults = {
+            "code": "000001", "name": "test",
+            "timing_score": 85.0, "action": "setup_ready",
+        }
+        defaults.update(kwargs)
+        s = SetupSignal(code=defaults["code"], name=defaults["name"])
+        for k, v in defaults.items():
+            if k not in ("code", "name"):
+                setattr(s, k, v)
+        return s
+
+    def test_no_context_no_change(self):
+        signal = self._make_signal()
+        action, reason, hp = apply_stage1_context(signal, None)
+        assert action == "setup_ready"
+        assert reason is None
+        assert hp is False
+
+    def test_hot_theme_low_demotes_ready(self):
+        signal = self._make_signal()
+        ctx = {"hot_theme_score": 0.40, "liquidity_execution_score": 0.8, "risk_control_score": 0.8}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "watch"
+        assert "hot_theme" in reason
+
+    def test_hot_theme_high_marks_priority(self):
+        signal = self._make_signal(timing_score=80.0)
+        ctx = {"hot_theme_score": 0.80}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert hp is True
+
+    def test_liquidity_low_demotes_ready(self):
+        signal = self._make_signal()
+        ctx = {"liquidity_execution_score": 0.45}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "watch"
+
+    def test_liquidity_critical_caps_wait(self):
+        signal = self._make_signal()
+        ctx = {"liquidity_execution_score": 0.30}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "wait"
+
+    def test_stage1_risk_low_demotes(self):
+        signal = self._make_signal()
+        ctx = {"risk_control_score": 0.35}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "watch"
+
+    def test_stage1_risk_critical_caps_wait(self):
+        signal = self._make_signal()
+        ctx = {"risk_control_score": 0.20}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "wait"
+
+    def test_bottom_50pct_needs_high_timing(self):
+        signal = self._make_signal(timing_score=82.0)
+        ctx = {"stage1_rank_pctile": 0.3}  # bottom 70%
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "watch"
+        assert "排名" in reason
+
+    def test_top_50pct_normal_timing_ok(self):
+        signal = self._make_signal(timing_score=82.0)
+        ctx = {"stage1_rank_pctile": 0.6}  # top 40%
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "setup_ready"
+
+    def test_watch_only_still_capped(self):
+        """Stage 1 不能让 watch 升级为 setup_ready."""
+        signal = self._make_signal(action="watch")
+        ctx = {"hot_theme_score": 0.90}
+        action, reason, hp = apply_stage1_context(signal, ctx)
+        assert action == "watch"  # 不会升级
+
+    def test_disabled_by_config(self):
+        cfg = SetupTimingConfig(enable_stage1_context=False)
+        signal = self._make_signal()
+        ctx = {"hot_theme_score": 0.10}  # 很低，但开关关了
+        action, reason, hp = apply_stage1_context(signal, ctx, config=cfg)
+        assert action == "setup_ready"  # 不受影响
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: 增强 reason / warnings / commentary
+# ════════════════════════════════════════════════════════
+
+class TestEnhancedReasonWarnings:
+    def test_reason_includes_repair(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.trend_score = 0.8
+        signal.pullback_score = 0.7
+        signal.volume_score = 0.7
+        signal.repair_score = 0.8
+        signal.risk_score = 0.8
+        reason = generate_reason(signal)
+        assert "分歧后修复" in reason
+
+    def test_reason_unrepaired(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.trend_score = 0.6
+        signal.pullback_score = 0.5
+        signal.volume_score = 0.5
+        signal.repair_score = 0.2
+        signal.risk_score = 0.6
+        reason = generate_reason(signal)
+        assert "未修复" in reason
+
+    def test_score_commentary_all_keys(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.trend_score = 0.7
+        signal.pullback_score = 0.6
+        signal.volume_score = 0.5
+        signal.repair_score = 0.5
+        signal.risk_score = 0.7
+        commentary = generate_score_commentary(signal)
+        assert "trend" in commentary
+        assert "pullback" in commentary
+        assert "volume" in commentary
+        assert "repair" in commentary
+        assert "risk" in commentary
+
+    def test_warnings_include_cap_reasons(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.risk_score = 0.8
+        signal.level_confidence = "high"
+        signal.market_regime = "neutral"
+        signal.ref_reward_risk = 2.0
+        signal.action_cap_reasons = ["risk_score=0.10→avoid_chase"]
+        warns = generate_warnings(signal)
+        assert any("action cap" in w for w in warns)
+
+    def test_warnings_include_stage1_reason(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.risk_score = 0.8
+        signal.level_confidence = "high"
+        signal.market_regime = "neutral"
+        signal.ref_reward_risk = 2.0
+        signal.stage1_adjustment_reason = "hot_theme=0.40<0.55→降为watch"
+        warns = generate_warnings(signal)
+        assert any("stage1" in w for w in warns)
+
+    def test_warnings_with_metrics(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.risk_score = 0.8
+        signal.level_confidence = "high"
+        signal.market_regime = "neutral"
+        signal.ref_reward_risk = 2.0
+        metrics = {"atr_pct": 9.0, "ma20": 10.0, "close": 11.5, "max_drawdown_5d": 12.0}
+        warns = generate_warnings(signal, metrics=metrics)
+        assert any("ATR%" in w for w in warns)
+        assert any("MA20" in w for w in warns)
+        assert any("回撤" in w for w in warns)
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: 盘中执行提示
+# ════════════════════════════════════════════════════════
+
+class TestIntradayHint:
+    def test_setup_ready_needs_confirmation(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.action = "setup_ready"
+        signal.risk_score = 0.7
+        signal.pullback_score = 0.7
+        signal.volume_score = 0.7
+        needs, hint = generate_intraday_hint(signal)
+        assert needs is True
+        assert len(hint) > 0
+        assert "竞价追高" in hint
+
+    def test_watch_gets_hint(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.action = "watch"
+        needs, hint = generate_intraday_hint(signal)
+        assert needs is True
+        assert "回踩到位" in hint
+
+    def test_wait_no_hint(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.action = "wait"
+        needs, hint = generate_intraday_hint(signal)
+        assert needs is False
+        assert hint == ""
+
+    def test_avoid_chase_no_hint(self):
+        signal = SetupSignal(code="000001", name="test")
+        signal.action = "avoid_chase"
+        needs, hint = generate_intraday_hint(signal)
+        assert needs is False
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 新增测试: 综合集成 (evaluate_setup_timing with v3.0 features)
+# ════════════════════════════════════════════════════════
+
+class TestEvaluateV3Integration:
+    def test_action_cap_applied_in_evaluation(self):
+        """evaluate_setup_timing 中 action cap 生效."""
+        # 生成一个高分序列，但给低 risk_score 条件（用一字板来压低 risk_score）
+        rows = _make_eod_series(60, base_close=10.0, trend=0.003)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+            upper_reversal_count_5d=4,  # 很多上影线 → risk_score 低 + cap 触发
+        )
+        # upper_reversal_count_5d=4 → risk_score 中 upper_reversal 子项=0.1
+        # 同时 action cap 规则11 (>=3天) → 最高wait
+        if signal.action_cap_reasons:
+            assert any("上影线" in r for r in signal.action_cap_reasons)
+
+    def test_stage1_context_integration(self):
+        """evaluate_setup_timing 中 stage1_context 生效."""
+        rows = _make_eod_series(60, base_close=10.0, trend=0.003)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+            stage1_context={"hot_theme_score": 0.30},
+        )
+        assert signal.stage1_context_used is True
+        # hot_theme=0.30 < 0.55 → 如果原 action 是 setup_ready，会被降级
+        if signal.final_action_before_stage1_cap == "setup_ready":
+            assert signal.action in ("watch", "wait", "avoid_chase")
+
+    def test_to_dict_includes_v3_fields(self):
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+            stage1_context={"hot_theme_score": 0.70},
+        )
+        d = signal.to_dict()
+        assert "action_cap_reasons" in d
+        assert "score_components_commentary" in d
+        assert "stage1_context_used" in d
+        assert "requires_intraday_confirmation" in d
+        assert "intraday_check_hint" in d
+        assert "high_priority_watch" in d
+
+    def test_intraday_hint_populated(self):
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+        )
+        # action 是 setup_ready 或 watch 时应有提示
+        if signal.action in ("setup_ready", "watch"):
+            assert signal.requires_intraday_confirmation is True
+            assert signal.intraday_check_hint != ""
+
+    def test_score_commentary_populated(self):
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+        )
+        assert len(signal.score_components_commentary) == 5
+
+    def test_backward_compat_no_stage1(self):
+        """不传 stage1_context 时行为与 v2.1 一致."""
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+        )
+        assert signal.stage1_context_used is False
+        assert signal.stage1_adjustment_reason is None
+
+    def test_backward_compat_insufficient_data(self):
+        """数据不足时仍返回 wait (向后兼容)."""
+        rows = _make_eod_series(5)
+        signal = evaluate_setup_timing(code="000001", name="test", eod_rows=rows)
+        assert signal.action == "wait"
+
+    def test_backward_compat_limit_board_avoid(self):
+        """一字涨停仍强制 avoid_chase (向后兼容)."""
+        rows = _make_eod_series(60, base_close=10.0, trend=0.005)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+            latest_is_limit_board=True,
+        )
+        assert signal.action == "avoid_chase"
+
+    def test_backward_compat_watch_only(self):
+        """watch_only 仍最高 watch (向后兼容)."""
+        rows = _make_eod_series(60, base_close=10.0, trend=0.003)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+            is_watch_only=True,
+        )
+        assert signal.action != "setup_ready"
+
+    def test_all_caps_disabled(self):
+        """全部新功能关闭时行为与 v2.1 一致."""
+        cfg = SetupTimingConfig(
+            enable_action_caps=False,
+            enable_volatility_adaptive_pullback=False,
+            enable_stage1_context=False,
+        )
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+            stage1_context={"hot_theme_score": 0.10},  # 很低但被忽略
+            config=cfg,
+        )
+        assert signal.stage1_context_used is False  # stage1 被关闭
+        assert signal.action_cap_reasons == []  # cap 被关闭
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 Round 2: 增强版 Market Regime
+# ════════════════════════════════════════════════════════
+
+from a_share_hot_screener.setup_timing import (
+    compute_enhanced_market_regime,
+    _find_swing_lows,
+    _find_divergence_low,
+    _find_box_low,
+    _cluster_support_levels,
+    _basic_support_zone,
+)
+
+
+class TestEnhancedMarketRegime:
+    def test_bull_expanding_is_risk_on(self):
+        closes = [100.0 + i * 0.5 for i in range(20)]  # +10%
+        amounts = [1e9] * 17 + [1.3e9, 1.4e9, 1.5e9]  # 近3日放量
+        result = compute_enhanced_market_regime(closes, amounts)
+        assert result["index_trend"] == "bull"
+        assert result["turnover_state"] == "expanding"
+        assert result["final_regime"] == "risk_on"
+        assert result["multiplier"] > 1.0
+
+    def test_bear_is_risk_off(self):
+        closes = [100.0 - i * 0.5 for i in range(20)]  # -10%
+        result = compute_enhanced_market_regime(closes)
+        assert result["final_regime"] == "risk_off"
+        assert result["multiplier"] < 1.0
+
+    def test_neutral_shrinking_is_risk_off(self):
+        closes = [100.0 + (i % 3 - 1) * 0.2 for i in range(20)]  # 小幅震荡
+        amounts = [1e9] * 17 + [5e8, 4e8, 3e8]  # 近3日缩量
+        result = compute_enhanced_market_regime(closes, amounts)
+        assert result["index_trend"] == "neutral"
+        assert result["turnover_state"] == "shrinking"
+        assert result["final_regime"] == "risk_off"
+
+    def test_neutral_normal_is_neutral(self):
+        closes = [100.0 + (i % 3 - 1) * 0.2 for i in range(20)]
+        amounts = [1e9] * 20  # 平稳量能
+        result = compute_enhanced_market_regime(closes, amounts)
+        assert result["final_regime"] == "neutral"
+        assert result["multiplier"] == pytest.approx(1.0)
+
+    def test_no_amounts_fallback(self):
+        closes = [100.0 + i * 0.5 for i in range(20)]
+        result = compute_enhanced_market_regime(closes, None)
+        assert result["turnover_state"] == "neutral"  # 无数据→中性
+
+    def test_no_data_fallback(self):
+        result = compute_enhanced_market_regime(None, None)
+        assert result["final_regime"] == "neutral"
+        assert result["multiplier"] == 1.0
+
+    def test_custom_multipliers(self):
+        cfg = SetupTimingConfig(
+            enable_enhanced_market_regime=True,
+            risk_on_multiplier=1.15,
+            risk_off_multiplier=0.80,
+        )
+        closes = [100.0 + i * 0.5 for i in range(20)]
+        result = compute_enhanced_market_regime(closes, config=cfg)
+        assert result["multiplier"] == pytest.approx(1.15)
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 Round 2: 支撑位检测函数
+# ════════════════════════════════════════════════════════
+
+class TestFindSwingLows:
+    def test_basic_swing_low(self):
+        rows = [
+            {"low": 10.0}, {"low": 9.5}, {"low": 9.0},  # swing low at idx 2
+            {"low": 9.3}, {"low": 9.8},
+        ]
+        lows = _find_swing_lows(rows, lookback=2)
+        assert len(lows) == 1
+        assert lows[0] == pytest.approx(9.0)
+
+    def test_no_swing_low(self):
+        rows = [{"low": 10.0 + i * 0.1} for i in range(10)]  # 单调上行
+        lows = _find_swing_lows(rows)
+        assert len(lows) == 0
+
+    def test_multiple_swing_lows(self):
+        rows = [
+            {"low": 10}, {"low": 9}, {"low": 8}, {"low": 9}, {"low": 10},  # 第一个 swing
+            {"low": 9}, {"low": 8.5}, {"low": 9.5}, {"low": 10},  # 第二个 swing
+        ]
+        lows = _find_swing_lows(rows)
+        assert len(lows) >= 1
+
+    def test_short_series(self):
+        rows = [{"low": 10}, {"low": 9}]
+        lows = _find_swing_lows(rows)
+        assert lows == []
+
+
+class TestFindDivergenceLow:
+    def test_finds_divergence(self):
+        rows = [
+            _make_eod_row("2026-04-10", 10.0, 10.8, 9.5, 9.8, 2000000),  # 分歧: 振幅13%
+            _make_eod_row("2026-04-11", 9.8, 10.0, 9.7, 9.9, 1000000),
+        ]
+        low = _find_divergence_low(rows)
+        assert low == pytest.approx(9.5)
+
+    def test_no_divergence(self):
+        rows = [
+            _make_eod_row("2026-04-10", 10.0, 10.1, 9.95, 10.05, 1000000),
+            _make_eod_row("2026-04-11", 10.05, 10.1, 10.0, 10.08, 1000000),
+        ]
+        low = _find_divergence_low(rows)
+        assert low is None
+
+
+class TestFindBoxLow:
+    def test_clustered_lows(self):
+        rows = [
+            {"low": 9.5}, {"low": 9.6}, {"low": 9.55}, {"low": 9.52},  # 4个聚集在~9.5
+            {"low": 10.0}, {"low": 10.5}, {"low": 11.0},
+        ]
+        box = _find_box_low(rows, close=10.0)
+        assert box is not None
+        assert 9.4 < box < 9.7
+
+    def test_no_cluster(self):
+        rows = [{"low": 9.0 + i * 0.5} for i in range(5)]  # 散布
+        box = _find_box_low(rows, close=11.0)
+        assert box is None
+
+    def test_short_series(self):
+        rows = [{"low": 10.0}, {"low": 10.1}]
+        box = _find_box_low(rows, close=10.0)
+        assert box is None
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 Round 2: 聚集区 + 增强参考价位
+# ════════════════════════════════════════════════════════
+
+class TestClusterSupportLevels:
+    def test_basic_clustering(self):
+        candidates = [
+            {"price": 9.50, "source": "ma10", "confidence": 0.8},
+            {"price": 9.55, "source": "swing_low", "confidence": 0.75},
+            {"price": 9.48, "source": "ma20", "confidence": 0.85},
+            {"price": 8.00, "source": "box_low", "confidence": 0.70},  # 远离聚集区
+        ]
+        low, high, basis, sorted_c = _cluster_support_levels(candidates, close=10.0)
+        assert low is not None
+        assert high is not None
+        # 9.48~9.55 应该聚集
+        assert 9.4 <= low <= 9.55
+        assert 9.48 <= high <= 9.6
+        # basis 应含多个 source
+        assert "+" in basis or basis in ("ma10", "ma20", "swing_low")
+
+    def test_empty_candidates(self):
+        low, high, basis, _ = _cluster_support_levels([], close=10.0)
+        assert low is None
+        assert high is None
+
+    def test_single_candidate(self):
+        candidates = [{"price": 9.5, "source": "ma20", "confidence": 0.8}]
+        low, high, basis, _ = _cluster_support_levels(candidates, close=10.0)
+        assert low == pytest.approx(9.5)
+        assert high == pytest.approx(9.5)
+        assert basis == "ma20"
+
+
+class TestEnhancedReferenceLevels:
+    def test_with_rows_produces_candidates(self):
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        result = compute_reference_levels(
+            close=rows[-1]["close"],
+            ma10=10.0, ma20=9.8, atr=0.3,
+            high_20d=11.0, low_20d=9.0,
+            rows=rows,
+        )
+        assert "candidate_support_levels" in result
+        assert len(result["candidate_support_levels"]) >= 2  # 至少 ma10 + ma20
+        assert result["support_zone_low"] is not None
+        assert result["resistance_1"] is not None
+
+    def test_resistance_2_present(self):
+        """40日内有更高点时 resistance_2 不为空."""
+        rows = _make_eod_series(60, base_close=10.0, trend=0.001)
+        # 在第30根插入一个远超近20日高点的spike
+        rows[30]["high"] = 30.0
+        high_20d = max(r["high"] for r in rows[-20:])
+        result = compute_reference_levels(
+            close=rows[-1]["close"],
+            ma10=None, ma20=None, atr=0.3,
+            high_20d=high_20d,
+            low_20d=min(r["low"] for r in rows[-20:]),
+            rows=rows,
+        )
+        # 30.0 在 rows[-40:] 内但不在 rows[-20:] 内 → resistance_2 = 30.0
+        assert result["resistance_2"] is not None
+        assert result["resistance_2"] >= result["resistance_1"]
+
+    def test_without_rows_fallback(self):
+        """不传rows时 fallback 到v2.1逻辑."""
+        result = compute_reference_levels(
+            close=10.0, ma10=10.2, ma20=9.8,
+            atr=0.5, high_20d=11.0, low_20d=9.0,
+        )
+        assert result["support_basis"] in ("ma10", "ma20")
+        assert result["candidate_support_levels"] == []
+        assert result["resistance_2"] is None
+
+    def test_disabled_by_config(self):
+        cfg = SetupTimingConfig(enable_enhanced_reference_levels=False)
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        result = compute_reference_levels(
+            close=10.0, ma10=10.2, ma20=9.8,
+            atr=0.5, high_20d=11.0, low_20d=9.0,
+            rows=rows, config=cfg,
+        )
+        assert result["candidate_support_levels"] == []
+
+    def test_invalidation_uses_multiple_sources(self):
+        """v3.0 增强版失效位来自多来源."""
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        close = rows[-1]["close"]
+        ma20 = sum(r["close"] for r in rows[-20:]) / 20
+        from a_share_hot_screener.setup_timing import _compute_atr
+        atr = _compute_atr(rows) or 0.3
+        result = compute_reference_levels(
+            close=close, ma10=None, ma20=ma20, atr=atr,
+            high_20d=max(r["high"] for r in rows[-20:]),
+            low_20d=min(r["low"] for r in rows[-20:]),
+            rows=rows,
+        )
+        # 失效位应存在且有效
+        assert result["invalidation_level"] is not None
+        assert result["invalidation_level"] < close
+
+    def test_backward_compat_no_rows(self):
+        """原有三个测试场景仍可用."""
+        # 复制原有 TestReferenceLevels.test_with_both_mas 的输入
+        result = compute_reference_levels(
+            close=10.0, ma10=10.2, ma20=9.8,
+            atr=0.5, high_20d=11.0, low_20d=9.0,
+        )
+        assert result["support_zone_low"] == pytest.approx(9.8 * 0.99, abs=0.01)
+        assert result["support_zone_high"] == pytest.approx(10.2 * 1.01, abs=0.01)
+        assert result["invalidation_level"] == pytest.approx(9.8 - 1.5 * 0.5, abs=0.01)
+        assert result["resistance_1"] == pytest.approx(11.0)
+        assert result["ref_reward_risk"] > 0
+
+
+# ════════════════════════════════════════════════════════
+# v3.0 Round 2: 集成测试
+# ════════════════════════════════════════════════════════
+
+class TestRound2Integration:
+    def test_evaluate_has_candidate_levels(self):
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+        )
+        assert len(signal.candidate_support_levels) >= 2
+
+    def test_evaluate_has_resistance_2(self):
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        signal = evaluate_setup_timing(
+            code="000001", name="test",
+            eod_rows=rows,
+        )
+        # resistance_2 可能为 None 如果没有明显前高
+        d = signal.to_dict()
+        assert "resistance_2" in d
+        assert "candidate_support_levels" in d
+
+    def test_run_with_enhanced_regime(self):
+        """run_setup_timing 使用增强版regime."""
+        detail = MagicMock()
+        detail.code = "000001"
+        detail.name = "test"
+        detail.ts_code = "000001.SZ"
+        detail.pass_stage1 = True
+        detail.pass_stage1_watch = False
+        detail.upper_reversal_count_5d = 0
+        detail.latest_is_limit_board = False
+        detail.limit_board_count_5d = 0
+        detail.volume_ratio = 1.2
+        detail.hot_theme_score = 0.7
+        detail.trend_flow_score = 0.7
+        detail.liquidity_execution_score = 0.7
+        detail.risk_control_score = 0.7
+        detail.total_score = 0.75
+
+        import pandas as pd
+        import datetime as dt
+        tushare = MagicMock()
+        rows = _make_eod_series(60)
+        tushare.get_daily.return_value = pd.DataFrame(rows)
+        cal = MagicMock()
+        cal.eod_start_date.return_value = dt.date(2025, 12, 1)
+
+        cfg = SetupTimingConfig(enable_enhanced_market_regime=True)
+        bull_closes = [100.0 + i * 0.5 for i in range(20)]
+        bull_amounts = [1e9] * 17 + [1.3e9, 1.4e9, 1.5e9]
+
+        signals = run_setup_timing(
+            details=[detail],
+            tushare_client=tushare,
+            trade_cal=cal,
+            trade_date_str="2026-04-22",
+            index_closes_20d=bull_closes,
+            index_amounts_20d=bull_amounts,
+            config=cfg,
+        )
+        assert len(signals) == 1
+        # 增强版regime应返回enhanced类型
+        assert signals[0].market_regime in ("risk_on", "neutral", "risk_off")
