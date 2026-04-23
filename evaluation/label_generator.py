@@ -46,6 +46,11 @@ class StockLabel:
     hit_limit_up_3d: Optional[bool] = None    # 3日内是否涨停
     beat_index_5d: Optional[bool] = None      # 5日是否跑赢沪深300
 
+    # ── Setup Timing 相关标签 (Round 3) ──
+    touched_support_zone_5d: Optional[bool] = None    # 未来5日最低价是否触及支撑区间
+    broke_invalidation_5d: Optional[bool] = None      # 未来5日最低价是否跌破失效位
+    touched_resistance_5d: Optional[bool] = None      # 未来5日最高价是否触及压力位
+
     # 元数据
     close_on_run_date: Optional[float] = None # run_date 收盘价
     future_days_available: int = 0            # 实际可用的未来交易日数
@@ -88,6 +93,7 @@ class LabelGenerator:
         run_date: str,
         stock_codes: Sequence[str],
         ts_code_map: Optional[Dict[str, str]] = None,
+        timing_signals: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> LabelResult:
         """为一批股票生成标签.
 
@@ -96,6 +102,8 @@ class LabelGenerator:
             stock_codes: 6位纯数字代码列表
             ts_code_map: code -> ts_code 映射 (如 {"600519": "600519.SH"})
                          如果不提供则自动推断
+            timing_signals: code -> SetupSignal.to_dict() 映射
+                            用于生成 timing 相关标签 (触及支撑/跌破失效/触及压力)
 
         Returns:
             LabelResult
@@ -121,12 +129,14 @@ class LabelGenerator:
         # 逐股生成标签
         for code in stock_codes:
             ts_code = self._resolve_ts_code(code, ts_code_map)
+            timing_data = (timing_signals or {}).get(code)
             label = self._generate_single(
                 code=code,
                 ts_code=ts_code,
                 run_date=run_date_norm,
                 future_dates=future_dates,
                 index_return_5d=result.index_return_5d,
+                timing_signal=timing_data,
             )
             result.labels.append(label)
 
@@ -154,6 +164,7 @@ class LabelGenerator:
         run_date: str,
         future_dates: List[str],
         index_return_5d: Optional[float],
+        timing_signal: Optional[Dict[str, Any]] = None,
     ) -> StockLabel:
         """为单只股票生成标签."""
         label = StockLabel(code=code, run_date=run_date)
@@ -248,6 +259,10 @@ class LabelGenerator:
             if index_return_5d is not None:
                 label.beat_index_5d = stock_return > index_return_5d
 
+        # ── Setup Timing 参考价位标签 (Round 3) ──
+        if timing_signal and label.future_days_available >= 1:
+            self._fill_timing_labels(label, future_lows, future_highs, timing_signal)
+
         # 标签质量
         if label.future_days_available >= 5:
             label.label_quality = "full"
@@ -257,6 +272,47 @@ class LabelGenerator:
             label.label_quality = "missing"
 
         return label
+
+    @staticmethod
+    def _fill_timing_labels(
+        label: StockLabel,
+        future_lows,
+        future_highs,
+        timing_signal: Dict[str, Any],
+    ) -> None:
+        """根据 setup_timing 参考价位填充 timing 相关标签.
+
+        Args:
+            label: 待填充的 StockLabel
+            future_lows: numpy array of future low prices
+            future_highs: numpy array of future high prices
+            timing_signal: SetupSignal.to_dict() 的输出
+        """
+        import numpy as np
+
+        days = min(5, len(future_lows))
+        if days < 1:
+            return
+
+        lows_5d = future_lows[:days]
+        highs_5d = future_highs[:days]
+        min_low = float(np.min(lows_5d))
+        max_high = float(np.max(highs_5d))
+
+        # 触及支撑区间: 最低价 <= support_zone_high
+        sz_high = timing_signal.get("support_zone_high")
+        if sz_high is not None:
+            label.touched_support_zone_5d = min_low <= sz_high
+
+        # 跌破失效位: 最低价 < invalidation_level
+        inv = timing_signal.get("invalidation_level")
+        if inv is not None:
+            label.broke_invalidation_5d = min_low < inv
+
+        # 触及压力位: 最高价 >= resistance_1
+        res = timing_signal.get("resistance_1")
+        if res is not None:
+            label.touched_resistance_5d = max_high >= res
 
     def _get_future_trade_dates(self, run_date: str, n: int = 6) -> List[str]:
         """获取 run_date 之后的 n 个交易日 (YYYYMMDD).
@@ -341,6 +397,8 @@ class LabelGenerator:
         fieldnames = [
             "code", "run_date", "return_t1", "mfe_3d", "mfe_5d",
             "mae_5d", "hit_limit_up_3d", "beat_index_5d",
+            "touched_support_zone_5d", "broke_invalidation_5d",
+            "touched_resistance_5d",
             "close_on_run_date", "future_days_available", "label_quality",
         ]
 
@@ -379,7 +437,9 @@ class LabelGenerator:
                     val = row.get(fld, "")
                     setattr(label, fld, float(val) if val else None)
 
-                for fld in ["hit_limit_up_3d", "beat_index_5d"]:
+                for fld in ["hit_limit_up_3d", "beat_index_5d",
+                            "touched_support_zone_5d", "broke_invalidation_5d",
+                            "touched_resistance_5d"]:
                     val = row.get(fld, "")
                     setattr(label, fld, val == "True" if val else None)
 

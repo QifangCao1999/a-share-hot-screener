@@ -21,6 +21,11 @@ from a_share_hot_screener.evaluation.harness import (
     SeparationResult,
 )
 
+# timing action 输出顺序
+_TIMING_ACTION_ORDER = ["setup_ready", "watch", "wait", "avoid_chase"]
+_TIMING_REGIME_ORDER = ["bull", "neutral", "bear"]
+_TIMING_CONFIDENCE_ORDER = ["high", "medium", "low"]
+
 logger = logging.getLogger("a_share_hot_screener.evaluation.report")
 
 
@@ -94,6 +99,56 @@ class EvaluationReport:
             lines.append(_fmt_separation(r.tradeable_vs_watch))
             lines.append("")
 
+        # ── Round 3: Timing 分组 ────────────────
+        if r.timing_by_action:
+            lines.append("─── Setup Timing 分组: 按 Action ───")
+            lines.append("")
+            for action in _TIMING_ACTION_ORDER:
+                gm = r.timing_by_action.get(action)
+                if gm and gm.count > 0:
+                    lines.extend(_fmt_timing_group(action, gm))
+            lines.append("")
+
+        if r.timing_by_regime:
+            lines.append("─── Setup Timing 分组: 按 Market Regime ───")
+            lines.append("")
+            for regime in _TIMING_REGIME_ORDER:
+                gm = r.timing_by_regime.get(regime)
+                if gm and gm.count > 0:
+                    lines.extend(_fmt_timing_group(regime, gm))
+            # 未知 regime
+            for rname, gm in r.timing_by_regime.items():
+                if rname not in _TIMING_REGIME_ORDER and gm.count > 0:
+                    lines.extend(_fmt_timing_group(rname, gm))
+            lines.append("")
+
+        if r.timing_by_confidence:
+            lines.append("─── Setup Timing 分组: 按 Level Confidence ───")
+            lines.append("")
+            for conf in _TIMING_CONFIDENCE_ORDER:
+                gm = r.timing_by_confidence.get(conf)
+                if gm and gm.count > 0:
+                    lines.extend(_fmt_timing_group(conf, gm))
+            lines.append("")
+
+        if r.timing_monotonicity and r.timing_monotonicity.decile_groups:
+            lines.append("─── 排序单调性 (timing_score 十分位) ───")
+            lines.append("")
+            mono = r.timing_monotonicity
+            lines.append(f"  单调: {'\u2705 是' if mono.is_monotonic else '\u274c 否'}  Spearman={_fmt(mono.spearman_corr)}")
+            lines.append("")
+            lines.append(f"  {'分位':>4}  {'数量':>4}  {'分数区间':>16}  {'MFE5d均值':>10}  {'MFE5d中位':>10}  {'T+1均值':>10}")
+            lines.append("  " + "-" * 62)
+            for g in mono.decile_groups:
+                lines.append(
+                    f"  D{g['decile']:>3}  {g['count']:>4}  "
+                    f"{_fmt(g.get('score_min'))}~{_fmt(g.get('score_max'))}  "
+                    f"{_fmt(g.get('avg_mfe_5d')):>10}%  "
+                    f"{_fmt(g.get('median_mfe_5d')):>10}%  "
+                    f"{_fmt(g.get('avg_return_t1')):>10}%"
+                )
+            lines.append("")
+
         lines.append("=" * 70)
         return "\n".join(lines)
 
@@ -110,12 +165,24 @@ class EvaluationReport:
             "hit_rate_mfe5d_gt5", "hit_rate_mfe5d_gt8",
             "hit_rate_limit_up_3d", "hit_rate_beat_index",
             "avg_reward_risk",
+            "hit_rate_touched_support", "hit_rate_broke_invalidation",
+            "hit_rate_touched_resistance",
         ]
+
+        # 收集所有分组（原有 + timing 分组）
+        all_groups: Dict[str, GroupMetrics] = {}
+        all_groups.update(self._result.group_metrics)
+        for action, gm in self._result.timing_by_action.items():
+            all_groups[f"timing_action_{action}"] = gm
+        for regime, gm in self._result.timing_by_regime.items():
+            all_groups[f"timing_regime_{regime}"] = gm
+        for conf, gm in self._result.timing_by_confidence.items():
+            all_groups[f"timing_confidence_{conf}"] = gm
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            for gname, gm in self._result.group_metrics.items():
+            for gname, gm in all_groups.items():
                 row = asdict(gm)
                 filtered = {k: row.get(k, "") for k in fieldnames}
                 for k, v in filtered.items():
@@ -156,6 +223,41 @@ class EvaluationReport:
         logger.info("[report] Decile CSV saved to %s", output_path)
         return output_path
 
+    def save_timing_decile_csv(self, output_path: str) -> str:
+        """保存 timing_score 十分位分析 CSV."""
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        mono = self._result.timing_monotonicity
+        if not mono or not mono.decile_groups:
+            # 创建空文件（仅表头）
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "decile", "count", "score_min", "score_max",
+                    "avg_mfe_5d", "median_mfe_5d", "avg_return_t1",
+                ])
+                writer.writeheader()
+            return output_path
+
+        fieldnames = [
+            "decile", "count", "score_min", "score_max",
+            "avg_mfe_5d", "median_mfe_5d", "avg_return_t1",
+        ]
+
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for g in mono.decile_groups:
+                row = {k: g.get(k, "") for k in fieldnames}
+                for k, v in row.items():
+                    if v is None:
+                        row[k] = ""
+                    elif isinstance(v, float):
+                        row[k] = f"{v:.4f}"
+                writer.writerow(row)
+
+        logger.info("[report] Timing decile CSV saved to %s", output_path)
+        return output_path
+
     def save_all(self, output_dir: str, prefix: str = "") -> Dict[str, str]:
         """保存所有报告文件.
 
@@ -178,10 +280,15 @@ class EvaluationReport:
         self.save_group_csv(group_path)
         paths["groups_csv"] = group_path
 
-        # 十分位 CSV
+        # 十分位 CSV (total_score)
         decile_path = os.path.join(output_dir, f"{pfx}evaluation_deciles.csv")
         self.save_decile_csv(decile_path)
         paths["deciles_csv"] = decile_path
+
+        # 十分位 CSV (timing_score) — Round 3
+        timing_decile_path = os.path.join(output_dir, f"{pfx}evaluation_timing_deciles.csv")
+        self.save_timing_decile_csv(timing_decile_path)
+        paths["timing_deciles_csv"] = timing_decile_path
 
         logger.info("[report] All reports saved to %s", output_dir)
         return paths
@@ -203,6 +310,33 @@ def _fmt_pct(val: Optional[float]) -> str:
     if val is None:
         return "N/A"
     return f"{val:.1%}"
+
+
+def _fmt_timing_group(label: str, gm: GroupMetrics) -> List[str]:
+    """格式化 timing 分组指标."""
+    lines = []
+    lines.append(f"  [{label}] (n={gm.count})")
+    lines.append(
+        f"    MFE 3d: avg={_fmt(gm.avg_mfe_3d)}%  med={_fmt(gm.median_mfe_3d)}%  "
+        f"hit>3%={_fmt_pct(gm.hit_rate_mfe3d_gt3)}  hit>5%={_fmt_pct(gm.hit_rate_mfe3d_gt5)}"
+    )
+    lines.append(
+        f"    MFE 5d: avg={_fmt(gm.avg_mfe_5d)}%  med={_fmt(gm.median_mfe_5d)}%  "
+        f"hit>5%={_fmt_pct(gm.hit_rate_mfe5d_gt5)}  hit>8%={_fmt_pct(gm.hit_rate_mfe5d_gt8)}"
+    )
+    lines.append(f"    T+1:    avg={_fmt(gm.avg_return_t1)}%  med={_fmt(gm.median_return_t1)}%  R/R: {_fmt(gm.avg_reward_risk)}")
+    # timing 专项
+    timing_parts = []
+    if gm.hit_rate_touched_support is not None:
+        timing_parts.append(f"触支撑={_fmt_pct(gm.hit_rate_touched_support)}")
+    if gm.hit_rate_broke_invalidation is not None:
+        timing_parts.append(f"破失效={_fmt_pct(gm.hit_rate_broke_invalidation)}")
+    if gm.hit_rate_touched_resistance is not None:
+        timing_parts.append(f"触压力={_fmt_pct(gm.hit_rate_touched_resistance)}")
+    if timing_parts:
+        lines.append(f"    Timing: {' '.join(timing_parts)}")
+    lines.append("")
+    return lines
 
 
 def _fmt_separation(sep: SeparationResult) -> str:

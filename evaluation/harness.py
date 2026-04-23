@@ -47,6 +47,20 @@ class ScoredStock:
     liquidity_execution_score: Optional[float] = None
     risk_control_score: Optional[float] = None
 
+    # Setup Timing (Phase 4)
+    timing_score: Optional[float] = None         # 0~100
+    timing_action: str = ""                       # setup_ready/watch/wait/avoid_chase
+    timing_level_confidence: str = ""             # high/medium/low
+    timing_risk_score: Optional[float] = None     # 0~1 风险维度分
+    timing_market_regime: str = ""                # bull/neutral/bear
+
+    # Context Scores (Phase 3: HT8/9/10)
+    ht8_score: Optional[float] = None
+    ht8_confirmation_level: str = ""
+    ht9_score: Optional[float] = None
+    ht10_score: Optional[float] = None
+    ht10_position_type: str = ""
+
     # 标签
     return_t1: Optional[float] = None
     mfe_3d: Optional[float] = None
@@ -54,6 +68,9 @@ class ScoredStock:
     mae_5d: Optional[float] = None
     hit_limit_up_3d: Optional[bool] = None
     beat_index_5d: Optional[bool] = None
+    touched_support_zone_5d: Optional[bool] = None
+    broke_invalidation_5d: Optional[bool] = None
+    touched_resistance_5d: Optional[bool] = None
     label_quality: str = "missing"
 
 
@@ -86,6 +103,11 @@ class GroupMetrics:
 
     # 风险
     avg_reward_risk: Optional[float] = None      # 平均 MFE5d / |MAE5d|
+
+    # timing 专项
+    hit_rate_touched_support: Optional[float] = None   # 触及支撑区间率
+    hit_rate_broke_invalidation: Optional[float] = None  # 跌破失效位率
+    hit_rate_touched_resistance: Optional[float] = None  # 触及压力位率
 
 
 @dataclass
@@ -127,6 +149,12 @@ class EvaluationResult:
 
     # tradeable vs watch_only
     tradeable_vs_watch: Optional[SeparationResult] = None
+
+    # ── Round 3: timing 分组 ──
+    timing_by_action: Dict[str, GroupMetrics] = field(default_factory=dict)
+    timing_by_regime: Dict[str, GroupMetrics] = field(default_factory=dict)
+    timing_by_confidence: Dict[str, GroupMetrics] = field(default_factory=dict)
+    timing_monotonicity: Optional[MonotonicityResult] = None  # timing_score 十分位
 
 
 # ════════════════════════════════════════════════════════
@@ -188,6 +216,20 @@ class EvaluationHarness:
             stock.liquidity_execution_score = _safe_float(srow.get("liquidity_execution_score"))
             stock.risk_control_score = _safe_float(srow.get("risk_control_score"))
 
+            # Setup Timing 字段
+            stock.timing_score = _safe_float(srow.get("timing_score"))
+            stock.timing_action = srow.get("timing_action", "")
+            stock.timing_level_confidence = srow.get("timing_level_confidence", "")
+            stock.timing_risk_score = _safe_float(srow.get("timing_risk_score"))  # 可能不在 summary
+            stock.timing_market_regime = srow.get("timing_market_regime", srow.get("market_regime", ""))
+
+            # Context Scores 字段
+            stock.ht8_score = _safe_float(srow.get("ht8_score"))
+            stock.ht8_confirmation_level = srow.get("ht8_confirmation_level", "")
+            stock.ht9_score = _safe_float(srow.get("ht9_score"))
+            stock.ht10_score = _safe_float(srow.get("ht10_score"))
+            stock.ht10_position_type = srow.get("ht10_position_type", "")
+
             # 合并标签
             lrow = label_map.get(code, {})
             if lrow:
@@ -197,6 +239,9 @@ class EvaluationHarness:
                 stock.mae_5d = _safe_float(lrow.get("mae_5d"))
                 stock.hit_limit_up_3d = lrow.get("hit_limit_up_3d") == "True"
                 stock.beat_index_5d = lrow.get("beat_index_5d") == "True"
+                stock.touched_support_zone_5d = lrow.get("touched_support_zone_5d") == "True" if lrow.get("touched_support_zone_5d") else None
+                stock.broke_invalidation_5d = lrow.get("broke_invalidation_5d") == "True" if lrow.get("broke_invalidation_5d") else None
+                stock.touched_resistance_5d = lrow.get("touched_resistance_5d") == "True" if lrow.get("touched_resistance_5d") else None
                 stock.label_quality = lrow.get("label_quality", "missing")
 
             stocks.append(stock)
@@ -248,6 +293,9 @@ class EvaluationHarness:
             pass_group=groups.get("pass_tradeable", []),
             fail_group=groups.get("pass_watch_only", []),
         )
+
+        # ── Round 3: timing 分组 ──────────────────────
+        self._evaluate_timing_groups(result, labeled)
 
         return result
 
@@ -335,6 +383,19 @@ class EvaluationHarness:
             if avg_mae is not None and avg_mfe is not None and avg_mae != 0:
                 m.avg_reward_risk = abs(avg_mfe / avg_mae)
 
+        # timing 专项命中率
+        support_vals = [s.touched_support_zone_5d for s in members if s.touched_support_zone_5d is not None]
+        if support_vals:
+            m.hit_rate_touched_support = sum(1 for v in support_vals if v) / len(support_vals)
+
+        inv_vals = [s.broke_invalidation_5d for s in members if s.broke_invalidation_5d is not None]
+        if inv_vals:
+            m.hit_rate_broke_invalidation = sum(1 for v in inv_vals if v) / len(inv_vals)
+
+        res_vals = [s.touched_resistance_5d for s in members if s.touched_resistance_5d is not None]
+        if res_vals:
+            m.hit_rate_touched_resistance = sum(1 for v in res_vals if v) / len(res_vals)
+
         return m
 
     def _compute_monotonicity(
@@ -411,6 +472,107 @@ class EvaluationHarness:
                 result.mfe_5d_diff = result.pass_group.median_mfe_5d - result.fail_group.median_mfe_5d
             if result.pass_group.median_return_t1 is not None and result.fail_group.median_return_t1 is not None:
                 result.return_t1_diff = result.pass_group.median_return_t1 - result.fail_group.median_return_t1
+
+        return result
+
+    # ════════════════════════════════════════════════════════
+    # Round 3: Timing 分组评估
+    # ════════════════════════════════════════════════════════
+
+    def _evaluate_timing_groups(
+        self,
+        result: EvaluationResult,
+        labeled: List[ScoredStock],
+    ) -> None:
+        """计算 timing 相关分组指标 (Round 3).
+
+        分组维度:
+          1. 按 timing_action: setup_ready / watch / wait / avoid_chase
+          2. 按 timing_market_regime: bull / neutral / bear
+          3. 按 timing_level_confidence: high / medium / low
+          4. timing_score 十分位单调性
+        """
+        # 筛选有 timing 数据的股票
+        timed = [s for s in labeled if s.timing_action]
+
+        # 1. 按 action 分组
+        action_groups: Dict[str, List[ScoredStock]] = {}
+        for s in timed:
+            action_groups.setdefault(s.timing_action, []).append(s)
+        for action_name, members in action_groups.items():
+            result.timing_by_action[action_name] = self._compute_group_metrics(
+                f"timing_action_{action_name}", members
+            )
+
+        # 2. 按 market_regime 分组
+        regime_groups: Dict[str, List[ScoredStock]] = {}
+        for s in timed:
+            regime = s.timing_market_regime or "unknown"
+            regime_groups.setdefault(regime, []).append(s)
+        for regime_name, members in regime_groups.items():
+            result.timing_by_regime[regime_name] = self._compute_group_metrics(
+                f"timing_regime_{regime_name}", members
+            )
+
+        # 3. 按 level_confidence 分组
+        conf_groups: Dict[str, List[ScoredStock]] = {}
+        for s in timed:
+            conf = s.timing_level_confidence or "unknown"
+            conf_groups.setdefault(conf, []).append(s)
+        for conf_name, members in conf_groups.items():
+            result.timing_by_confidence[conf_name] = self._compute_group_metrics(
+                f"timing_confidence_{conf_name}", members
+            )
+
+        # 4. timing_score 十分位单调性
+        valid_timing = [s for s in timed if s.timing_score is not None and s.mfe_5d is not None]
+        result.timing_monotonicity = self._compute_timing_monotonicity(valid_timing)
+
+    def _compute_timing_monotonicity(
+        self,
+        stocks: List[ScoredStock],
+    ) -> MonotonicityResult:
+        """计算 timing_score 十分位分组 MFE 单调性."""
+        result = MonotonicityResult()
+
+        if len(stocks) < 10:
+            return result
+
+        sorted_stocks = sorted(stocks, key=lambda s: s.timing_score or 0, reverse=True)
+        n = len(sorted_stocks)
+        decile_size = max(1, n // 10)
+
+        decile_groups = []
+        for i in range(10):
+            start = i * decile_size
+            end = start + decile_size if i < 9 else n
+            group = sorted_stocks[start:end]
+            if not group:
+                continue
+
+            timing_scores = [s.timing_score for s in group if s.timing_score is not None]
+            mfe_vals = [s.mfe_5d for s in group if s.mfe_5d is not None]
+
+            decile_groups.append({
+                "decile": i + 1,
+                "count": len(group),
+                "score_min": min(timing_scores) if timing_scores else None,
+                "score_max": max(timing_scores) if timing_scores else None,
+                "avg_mfe_5d": _mean(mfe_vals),
+                "median_mfe_5d": _median(mfe_vals),
+                "avg_return_t1": _mean([s.return_t1 for s in group if s.return_t1 is not None]),
+            })
+
+        result.decile_groups = decile_groups
+
+        mfe_means = [g["avg_mfe_5d"] for g in decile_groups if g["avg_mfe_5d"] is not None]
+        if len(mfe_means) >= 5:
+            result.is_monotonic = mfe_means[0] > mfe_means[-1]
+            try:
+                ranks = list(range(1, len(mfe_means) + 1))
+                result.spearman_corr = _spearman_corr(ranks, mfe_means)
+            except Exception:
+                pass
 
         return result
 
