@@ -589,8 +589,9 @@ class Stage1HotPipeline:
             logger.info("[setup_timing] 无 tradeable 股票，跳过")
             return
 
-        # 获取大盘指数近20日收盘价
+        # 获取大盘指数近20日收盘价和成交额 (I3/I4)
         index_closes_20d = None
+        index_amounts_20d = None
         try:
             index_code = self.config.setup_timing_index_code
             trade_date = _dt.date.fromisoformat(trade_date_str)
@@ -601,12 +602,24 @@ class Stage1HotPipeline:
                 end_date=trade_date_str.replace("-", ""),
             )
             if index_df is not None and not index_df.empty:
-                # 按日期升序
+                # 按日期升序，取最近20日
                 idx_sorted = index_df.sort_values("trade_date")
                 index_closes_20d = idx_sorted["close"].tolist()[-20:]
+                # I4: 提取 amount 序列用于 enhanced market regime
+                if "amount" in idx_sorted.columns:
+                    raw_amounts = idx_sorted["amount"].tolist()[-20:]
+                    # amount 单位通常为千元，统一转换为元；过滤非正值
+                    index_amounts_20d = [
+                        float(a) * 1000 for a in raw_amounts
+                        if a is not None and float(a) > 0
+                    ] or None
         except Exception as e:
             logger.warning("[setup_timing] 获取大盘指数失败: %s", e)
             self.warnings.add_global(f"[setup_timing] 获取大盘指数失败: {e}")
+
+        # I3: 从主配置取 SetupTimingConfig（若存在），否则使用模块默认
+        from a_share_hot_screener.setup_timing import SetupTimingConfig as _STConfig
+        setup_timing_cfg: "_STConfig | None" = getattr(self.config, "setup_timing_config", None)
 
         # 运行评估
         signals = _run_setup_timing_batch(
@@ -615,6 +628,8 @@ class Stage1HotPipeline:
             trade_cal=self._trade_cal,
             trade_date_str=trade_date_str,
             index_closes_20d=index_closes_20d,
+            index_amounts_20d=index_amounts_20d,
+            config=setup_timing_cfg,
         )
 
         # 写入 detail.setup_timing

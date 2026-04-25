@@ -112,6 +112,7 @@ class SetupTimingConfig:
     high_priority_hot_theme: float = 0.75           # hot_theme >= 此值 且 timing >= 75 → high_priority
     high_priority_timing: float = 75.0              # 配合上条
     stage1_bottom_pctile_timing: float = 85.0       # total_score 后50% 需 timing >= 此值才能 setup_ready
+    min_stage1_rank_sample_size: int = 20           # I10: 候选池 < 此值时不使用 rank_pctile 降级
 
     # ── Market Regime 增强 (v3.0) ──────────────────────
     enable_enhanced_market_regime: bool = False      # 启用增强版大盘环境判断
@@ -124,6 +125,10 @@ class SetupTimingConfig:
 
 # 默认配置 (模块级单例)
 _DEFAULT_CONFIG = SetupTimingConfig()
+
+# I5: 弱市 regime 集合 — basic regime 用 "bear"，enhanced regime 用 risk_off / ice_point
+# action_cap 和 warnings 对这些 regime 一视同仁
+WEAK_REGIMES: frozenset = frozenset({"bear", "risk_off", "ice_point"})
 
 
 # ════════════════════════════════════════════════════════
@@ -1358,8 +1363,8 @@ def apply_action_caps(
             )
             action = new
 
-    # ── 规则 12-13: 弱市环境 ─────────────────────────
-    if signal.market_regime == "bear":
+    # ── 规则 12-13: 弱市环境 (I5: 统一 bear/risk_off/ice_point) ──
+    if signal.market_regime in WEAK_REGIMES:
         if signal.timing_score < cfg.cap_bear_ready_threshold and action == "setup_ready":
             cap_reasons.append(
                 f"bear市且timing={signal.timing_score:.1f}<{cfg.cap_bear_ready_threshold}→不允许setup_ready"
@@ -1588,8 +1593,8 @@ def generate_warnings(
         warns.append(f"风险评分偏低({signal.risk_score:.2f})，注意控制仓位")
     if signal.level_confidence == "low":
         warns.append("参考价位置信度低，仅供参考")
-    if signal.market_regime == "bear":
-        warns.append("大盘环境偏弱，谨慎操作")
+    if signal.market_regime in WEAK_REGIMES:
+        warns.append(f"大盘环境偏弱({signal.market_regime})，谨慎操作")
     if signal.ref_reward_risk is not None and signal.ref_reward_risk < 1.0:
         warns.append(f"盈亏比不足1:1(当前{signal.ref_reward_risk:.2f})")
 
@@ -2078,7 +2083,9 @@ def run_setup_timing(
             if cfg.enable_stage1_context:
                 ts_val = getattr(detail, "total_score", None)
                 rank_pctile = None
-                if ts_val is not None and isinstance(ts_val, (int, float)) and total_count > 0:
+                # I10: 候选池样本数达到阈値才使用排名百分位，避免小样本误伤
+                rank_sample_ok = total_count >= cfg.min_stage1_rank_sample_size
+                if ts_val is not None and isinstance(ts_val, (int, float)) and rank_sample_ok:
                     # 用 bisect 计算百分位 (越大越靠前)
                     import bisect
                     pos = bisect.bisect_right(total_scores, ts_val)

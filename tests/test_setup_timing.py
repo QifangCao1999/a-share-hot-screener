@@ -1860,3 +1860,328 @@ class TestRound2Integration:
         assert len(signals) == 1
         # 增强版regime应返回enhanced类型
         assert signals[0].market_regime in ("risk_on", "neutral", "risk_off")
+
+
+# ════════════════════════════════════════════════════════
+# 第一批 Integration Fix 测试 (I3/I4/I5/I10)
+# ════════════════════════════════════════════════════════
+
+class TestWeakRegimes:
+    """I5: 弱市 regime 语义统一测试."""
+
+    def test_bear_triggers_action_cap(self):
+        """bear 仍然触发弱市 cap."""
+        from a_share_hot_screener.setup_timing import (
+            WEAK_REGIMES, apply_action_caps, SetupSignal, SetupTimingConfig,
+        )
+        sig = SetupSignal(code="000001", name="T", timing_score=70.0, action="setup_ready")
+        sig.market_regime = "bear"
+        sig.risk_score = 0.5
+        sig.level_confidence = "high"
+        sig.ref_reward_risk = 2.0
+        cfg = SetupTimingConfig(cap_bear_ready_threshold=75.0)
+        action, reasons = apply_action_caps(sig, metrics={}, upper_reversal_count_5d=0,
+                                             limit_board_count_5d=0, config=cfg)
+        assert action in ("watch", "wait", "avoid_chase"), "bear 市应降级 setup_ready"
+        assert any("bear" in r.lower() for r in reasons)
+
+    def test_risk_off_triggers_weak_cap(self):
+        """risk_off 应触发弱市 action cap."""
+        from a_share_hot_screener.setup_timing import (
+            apply_action_caps, SetupSignal, SetupTimingConfig,
+        )
+        sig = SetupSignal(code="000001", name="T", timing_score=70.0, action="setup_ready")
+        sig.market_regime = "risk_off"
+        sig.risk_score = 0.3  # 低于 cap_bear_min_risk_score=0.4
+        sig.level_confidence = "high"
+        sig.ref_reward_risk = 2.0
+        cfg = SetupTimingConfig(cap_bear_ready_threshold=75.0, cap_bear_min_risk_score=0.4)
+        action, reasons = apply_action_caps(sig, metrics={}, upper_reversal_count_5d=0,
+                                             limit_board_count_5d=0, config=cfg)
+        assert action in ("wait", "avoid_chase"), "risk_off + 低风险分应降至最高 wait"
+
+    def test_ice_point_triggers_weak_cap(self):
+        """ice_point 应触发弱市 action cap."""
+        from a_share_hot_screener.setup_timing import (
+            apply_action_caps, SetupSignal, SetupTimingConfig,
+        )
+        sig = SetupSignal(code="000001", name="T", timing_score=70.0, action="setup_ready")
+        sig.market_regime = "ice_point"
+        sig.risk_score = 0.3
+        sig.level_confidence = "high"
+        sig.ref_reward_risk = 2.0
+        cfg = SetupTimingConfig(cap_bear_ready_threshold=75.0, cap_bear_min_risk_score=0.4)
+        action, reasons = apply_action_caps(sig, metrics={}, upper_reversal_count_5d=0,
+                                             limit_board_count_5d=0, config=cfg)
+        assert action in ("wait", "avoid_chase"), "ice_point 应降至最高 wait"
+
+    def test_neutral_not_triggered(self):
+        """neutral 不触发弱市 cap."""
+        from a_share_hot_screener.setup_timing import (
+            apply_action_caps, SetupSignal, SetupTimingConfig,
+        )
+        sig = SetupSignal(code="000001", name="T", timing_score=82.0, action="setup_ready")
+        sig.market_regime = "neutral"
+        sig.risk_score = 0.5
+        sig.level_confidence = "high"
+        sig.ref_reward_risk = 2.5
+        cfg = SetupTimingConfig()
+        action, reasons = apply_action_caps(sig, metrics={}, upper_reversal_count_5d=0,
+                                             limit_board_count_5d=0, config=cfg)
+        assert action == "setup_ready", "neutral 不应被弱市 cap"
+
+    def test_weak_regimes_set_contents(self):
+        """WEAK_REGIMES 集合包含预期成员."""
+        from a_share_hot_screener.setup_timing import WEAK_REGIMES
+        assert "bear" in WEAK_REGIMES
+        assert "risk_off" in WEAK_REGIMES
+        assert "ice_point" in WEAK_REGIMES
+        assert "neutral" not in WEAK_REGIMES
+        assert "risk_on" not in WEAK_REGIMES
+
+    def test_weak_regime_warning_message(self):
+        """弱市 warning 消息包含 regime 名称."""
+        from a_share_hot_screener.setup_timing import generate_warnings, SetupSignal
+        for regime in ("bear", "risk_off", "ice_point"):
+            sig = SetupSignal(code="000001", name="T", timing_score=70.0, action="watch")
+            sig.market_regime = regime
+            sig.risk_score = 0.5
+            sig.level_confidence = "medium"
+            warns = generate_warnings(sig)
+            assert any(regime in w for w in warns), f"{regime} 应出现在 warning 中"
+
+
+class TestSmallSampleRankPctile:
+    """I10: 小样本不使用 stage1_rank_pctile 测试."""
+
+    def _make_detail(self, total_score=0.70):
+        from unittest.mock import MagicMock
+        d = MagicMock()
+        d.pass_stage1 = True
+        d.pass_stage1_watch = False
+        d.ts_code = "000001.SZ"
+        d.code = "000001"
+        d.name = "测试"
+        d.total_score = total_score
+        d.hot_theme_score = 0.6
+        d.trend_flow_score = 0.6
+        d.liquidity_execution_score = 0.6
+        d.risk_control_score = 0.45
+        d.upper_reversal_count_5d = 0
+        d.latest_is_limit_board = False
+        d.limit_board_count_5d = 0
+        d.volume_ratio = 1.0
+        return d
+
+    def _make_eod(self, n=60):
+        import datetime as dt
+        rows = []
+        base = dt.date(2026, 1, 1)
+        for i in range(n):
+            rows.append({
+                "ts_code": "000001.SZ", "trade_date": (base + dt.timedelta(days=i)).strftime("%Y%m%d"),
+                "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2 + i * 0.01,
+                "vol": 1e6, "amount": 1e7,
+            })
+        return rows
+
+    def test_small_sample_no_rank_pctile(self):
+        """样本数 < min_stage1_rank_sample_size 时 rank_pctile 应为 None."""
+        import pandas as pd
+        import datetime as dt
+        from unittest.mock import MagicMock
+        from a_share_hot_screener.setup_timing import run_setup_timing, SetupTimingConfig
+
+        # 只提供 5 只股票（< 默认阈值 20）
+        details = [self._make_detail(0.70 + i * 0.02) for i in range(5)]
+        tushare = MagicMock()
+        tushare.get_daily.return_value = pd.DataFrame(self._make_eod(60))
+        cal = MagicMock()
+        cal.eod_start_date.return_value = dt.date(2025, 12, 1)
+
+        # 设置一个低分股，rank_pctile 应为 None，不会被后50%规则降级
+        cfg = SetupTimingConfig(
+            enable_stage1_context=True,
+            min_stage1_rank_sample_size=20,
+            stage1_bottom_pctile_timing=85.0,
+        )
+        signals = run_setup_timing(
+            details=details,
+            tushare_client=tushare,
+            trade_cal=cal,
+            trade_date_str="2026-04-22",
+            config=cfg,
+        )
+        # 不应因排名规则降级（stage1_adjustment_reason 不应包含"排名后"）
+        for sig in signals:
+            if sig.stage1_adjustment_reason:
+                assert "排名后" not in sig.stage1_adjustment_reason, \
+                    f"小样本不应触发排名降级，但 {sig.code} 触发了: {sig.stage1_adjustment_reason}"
+
+    def test_large_sample_uses_rank_pctile(self):
+        """样本数 >= min_stage1_rank_sample_size 时 rank_pctile 可以生效."""
+        import pandas as pd
+        import datetime as dt
+        from unittest.mock import MagicMock
+        from a_share_hot_screener.setup_timing import run_setup_timing, SetupTimingConfig
+
+        # 25 只股票，底部股 total_score 很低
+        details = [self._make_detail(0.50 + i * 0.01) for i in range(25)]
+        # 最底部的几只分数很低，rank_pctile < 0.5
+        for d in details[:5]:
+            d.total_score = 0.40
+
+        tushare = MagicMock()
+        tushare.get_daily.return_value = pd.DataFrame(self._make_eod(60))
+        cal = MagicMock()
+        cal.eod_start_date.return_value = dt.date(2025, 12, 1)
+
+        cfg = SetupTimingConfig(
+            enable_stage1_context=True,
+            min_stage1_rank_sample_size=20,
+        )
+        # 只要不崩溃，样本数足够时排名逻辑可以运行
+        signals = run_setup_timing(
+            details=details,
+            tushare_client=tushare,
+            trade_cal=cal,
+            trade_date_str="2026-04-22",
+            config=cfg,
+        )
+        assert len(signals) == 25
+
+    def test_config_min_rank_sample_size_default(self):
+        """SetupTimingConfig 默认 min_stage1_rank_sample_size=20."""
+        from a_share_hot_screener.setup_timing import SetupTimingConfig
+        cfg = SetupTimingConfig()
+        assert cfg.min_stage1_rank_sample_size == 20
+
+    def test_config_min_rank_sample_size_custom(self):
+        """可以自定义 min_stage1_rank_sample_size."""
+        from a_share_hot_screener.setup_timing import SetupTimingConfig
+        cfg = SetupTimingConfig(min_stage1_rank_sample_size=5)
+        assert cfg.min_stage1_rank_sample_size == 5
+
+
+class TestPipelinePassesConfigAndAmounts:
+    """I3/I4: pipeline 传入 config 和 index_amounts_20d 测试."""
+
+    def _make_tradeable_detail(self):
+        from unittest.mock import MagicMock
+        d = MagicMock()
+        d.pass_stage1 = True
+        d.pass_stage1_watch = False
+        d.ts_code = "000001.SZ"
+        d.code = "000001"
+        d.name = "Test"
+        d.total_score = 0.75
+        d.hot_theme_score = 0.7
+        d.trend_flow_score = 0.7
+        d.liquidity_execution_score = 0.7
+        d.risk_control_score = 0.5
+        d.upper_reversal_count_5d = 0
+        d.latest_is_limit_board = False
+        d.limit_board_count_5d = 0
+        d.volume_ratio = 1.0
+        return d
+
+    def test_pipeline_passes_amounts_to_batch(self):
+        """pipeline 拉取 amount 列后传入 run_setup_timing."""
+        import pandas as pd
+        import datetime as dt
+        from unittest.mock import MagicMock, patch
+
+        # 构造带 amount 列的指数数据
+        idx_rows = []
+        for i in range(25):
+            idx_rows.append({
+                "trade_date": f"202604{i+1:02d}",
+                "close": 3000.0 + i * 5,
+                "amount": 5e8 + i * 1e7,
+            })
+        idx_df = pd.DataFrame(idx_rows)
+
+        captured = {}
+
+        def mock_run(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with patch("a_share_hot_screener.pipeline._run_setup_timing_batch", mock_run):
+            from a_share_hot_screener.pipeline import Stage1HotPipeline
+            from a_share_hot_screener.config import HotScreenerConfig
+
+            cfg = HotScreenerConfig(
+                tushare_token="test",
+                run_date=dt.date(2026, 4, 22),
+                stock_codes=[],
+                output_dir="/tmp/test_output",
+                enable_setup_timing=True,
+            )
+            pipeline = Stage1HotPipeline.__new__(Stage1HotPipeline)
+            pipeline.config = cfg
+            pipeline._details = [self._make_tradeable_detail()]
+            pipeline.warnings = MagicMock()
+            pipeline.warnings.add_global = MagicMock()
+
+            tushare_mock = MagicMock()
+            tushare_mock.get_daily.return_value = idx_df
+            pipeline._tushare = tushare_mock
+
+            cal_mock = MagicMock()
+            cal_mock.n_trade_dates_before.return_value = dt.date(2026, 3, 20)
+            pipeline._trade_cal = cal_mock
+
+            pipeline._run_setup_timing("2026-04-22")
+
+        # amount 数据应该被传入
+        assert "index_amounts_20d" in captured
+        if captured["index_amounts_20d"] is not None:
+            assert all(a > 0 for a in captured["index_amounts_20d"])
+
+    def test_pipeline_passes_config_to_batch(self):
+        """pipeline 应从 config 读取 setup_timing_config 并传入。"""
+        import datetime as dt
+        from unittest.mock import MagicMock, patch
+        from a_share_hot_screener.setup_timing import SetupTimingConfig
+
+        captured = {}
+
+        def mock_run(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with patch("a_share_hot_screener.pipeline._run_setup_timing_batch", mock_run):
+            from a_share_hot_screener.pipeline import Stage1HotPipeline
+            from a_share_hot_screener.config import HotScreenerConfig
+
+            st_cfg = SetupTimingConfig(enable_action_caps=False)
+            cfg = HotScreenerConfig(
+                tushare_token="test",
+                run_date=dt.date(2026, 4, 22),
+                stock_codes=[],
+                output_dir="/tmp/test_output2",
+                enable_setup_timing=True,
+            )
+            # 手动附加 setup_timing_config
+            cfg.setup_timing_config = st_cfg
+
+            pipeline = Stage1HotPipeline.__new__(Stage1HotPipeline)
+            pipeline.config = cfg
+            pipeline._details = [self._make_tradeable_detail()]
+            pipeline.warnings = MagicMock()
+            pipeline.warnings.add_global = MagicMock()
+
+            import pandas as pd
+            tushare_mock = MagicMock()
+            tushare_mock.get_daily.return_value = pd.DataFrame(
+                [{"trade_date": "20260422", "close": 3000.0, "amount": 5e8}]
+            )
+            pipeline._tushare = tushare_mock
+            cal_mock = MagicMock()
+            cal_mock.n_trade_dates_before.return_value = dt.date(2026, 3, 20)
+            pipeline._trade_cal = cal_mock
+
+            pipeline._run_setup_timing("2026-04-22")
+
+        assert captured.get("config") is st_cfg, "pipeline 应将 setup_timing_config 传入 run_setup_timing"
