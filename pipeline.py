@@ -667,22 +667,47 @@ class Stage1HotPipeline:
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
 
         fieldnames = [
+            # 基础信息
             "code", "name", "timing_score", "action",
+            # 分项评分
             "trend_score", "pullback_score", "volume_score",
             "repair_score", "risk_score",
+            # 参考价位
             "support_zone_low", "support_zone_high",
-            "invalidation_level", "resistance_1",
+            "invalidation_level", "resistance_1", "resistance_2",
             "ref_reward_risk", "level_confidence",
-            "support_basis", "market_regime", "market_multiplier",
+            "support_basis",
+            # 大盘环境
+            "market_regime", "market_multiplier",
+            # v3.0: action cap & stage1 联动
+            "action_cap_reasons",
+            "final_action_before_stage1_cap", "final_action_after_stage1_cap",
+            "stage1_context_used", "stage1_adjustment_reason",
+            "setup_priority", "setup_priority_reason",
+            # v3.0: 盘中提示
+            "requires_intraday_confirmation", "intraday_check_hint",
+            # v3.0: 详细信息 (JSON)
+            "candidate_support_levels_json", "score_components_commentary_json",
+            # 理由和警告
             "reason", "warnings",
         ]
+
+        import json as _json
 
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             for sig in sorted(signals, key=lambda s: -s.timing_score):
                 row = sig.to_dict()
+                # list/dict 字段转 JSON string→CSV 友好
                 row["warnings"] = "; ".join(row.get("warnings", []))
+                row["action_cap_reasons"] = "; ".join(row.get("action_cap_reasons", []))
+                row["candidate_support_levels_json"] = _json.dumps(
+                    row.pop("candidate_support_levels", []), ensure_ascii=False,
+                )
+                row["score_components_commentary_json"] = _json.dumps(
+                    row.pop("score_components_commentary", {}), ensure_ascii=False,
+                )
                 writer.writerow(row)
 
         logger.info("[setup_timing] CSV 输出: %s", csv_path)

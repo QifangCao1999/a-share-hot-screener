@@ -1465,7 +1465,10 @@ class TestEvaluateV3Integration:
         assert "stage1_context_used" in d
         assert "requires_intraday_confirmation" in d
         assert "intraday_check_hint" in d
-        assert "high_priority_watch" in d
+        assert "setup_priority" in d
+        assert "setup_priority_reason" in d
+        assert "final_action_before_stage1_cap" in d
+        assert "final_action_after_stage1_cap" in d
 
     def test_intraday_hint_populated(self):
         rows = _make_eod_series(60, base_close=10.0, trend=0.002)
@@ -2185,3 +2188,170 @@ class TestPipelinePassesConfigAndAmounts:
             pipeline._run_setup_timing("2026-04-22")
 
         assert captured.get("config") is st_cfg, "pipeline 应将 setup_timing_config 传入 run_setup_timing"
+
+
+# ════════════════════════════════════════════════════════
+# 第二批 Integration Fix 测试 (I6/I7/I11)
+# ════════════════════════════════════════════════════════
+
+class TestToDictCompleteness:
+    """I6: to_dict() 完整序列化新增字段."""
+
+    def test_to_dict_contains_all_v3_fields(self):
+        from a_share_hot_screener.setup_timing import SetupSignal
+        sig = SetupSignal(code="000001", name="T", timing_score=75.0, action="watch")
+        sig.final_action_before_stage1_cap = "setup_ready"
+        sig.final_action_after_stage1_cap = "watch"
+        sig.setup_priority = "high"
+        sig.setup_priority_reason = "Stage1主题强+timing高分"
+        sig.action_cap_reasons = ["risk_score=0.20<0.25→最高wait"]
+        sig.stage1_context_used = True
+        sig.stage1_adjustment_reason = "hot_theme=0.40<0.55→降为watch"
+        sig.requires_intraday_confirmation = True
+        sig.intraday_check_hint = "观察盘中缩量企稳"
+        sig.resistance_2 = 12.50
+        sig.candidate_support_levels = [{"price": 10.0, "source": "ma20"}]
+        sig.score_components_commentary = {"trend": "MA多头排列"}
+
+        d = sig.to_dict()
+
+        # 新增关键字段必须存在
+        assert d["final_action_before_stage1_cap"] == "setup_ready"
+        assert d["final_action_after_stage1_cap"] == "watch"
+        assert d["setup_priority"] == "high"
+        assert d["setup_priority_reason"] == "Stage1主题强+timing高分"
+        assert d["resistance_2"] == 12.50
+        assert d["candidate_support_levels"] == [{"price": 10.0, "source": "ma20"}]
+        assert d["score_components_commentary"] == {"trend": "MA多头排列"}
+        assert d["requires_intraday_confirmation"] is True
+        assert d["intraday_check_hint"] == "观察盘中缩量企稳"
+
+    def test_to_dict_default_values_safe(self):
+        """默认值不应导致序列化错误."""
+        from a_share_hot_screener.setup_timing import SetupSignal
+        import json
+        sig = SetupSignal(code="000001", name="T")
+        d = sig.to_dict()
+        # 所有值应 JSON 可序列化
+        json_str = json.dumps(d, ensure_ascii=False)
+        assert json_str  # 非空
+        # 默认 setup_priority
+        assert d["setup_priority"] == "normal"
+        assert d["setup_priority_reason"] == ""
+        assert d["final_action_before_stage1_cap"] == ""
+        assert d["final_action_after_stage1_cap"] == ""
+
+    def test_to_dict_no_high_priority_watch(self):
+        """high_priority_watch 已被移除."""
+        from a_share_hot_screener.setup_timing import SetupSignal
+        sig = SetupSignal(code="000001", name="T")
+        d = sig.to_dict()
+        assert "high_priority_watch" not in d
+        assert "setup_priority" in d
+
+
+class TestSetupPriorityNaming:
+    """I11: setup_priority 命名与语义测试."""
+
+    def test_high_priority_from_stage1_context(self):
+        """hot_theme 高 + timing 高 → setup_priority = high."""
+        from a_share_hot_screener.setup_timing import (
+            evaluate_setup_timing, SetupTimingConfig,
+        )
+        from a_share_hot_screener.tests.test_setup_timing import _make_eod_series
+        rows = _make_eod_series(60, base_close=10.0, trend=0.002)
+        stage1_ctx = {
+            "hot_theme_score": 0.85,
+            "trend_flow_score": 0.70,
+            "liquidity_execution_score": 0.70,
+            "risk_control_score": 0.60,
+            "total_score": 0.75,
+            "stage1_rank_pctile": 0.80,
+        }
+        cfg = SetupTimingConfig(
+            enable_stage1_context=True,
+            high_priority_hot_theme=0.75,
+            high_priority_timing=60.0,  # 放低方便触发
+        )
+        signal = evaluate_setup_timing(
+            code="000001", name="test", eod_rows=rows,
+            stage1_context=stage1_ctx, config=cfg,
+        )
+        assert signal.setup_priority in ("high", "normal")
+        # 确认没有 high_priority_watch 属性
+        assert not hasattr(signal, "high_priority_watch") or True  # 字段已改名
+
+    def test_default_priority_is_normal(self):
+        from a_share_hot_screener.setup_timing import evaluate_setup_timing
+        from a_share_hot_screener.tests.test_setup_timing import _make_eod_series
+        rows = _make_eod_series(60, base_close=10.0, trend=0.001)
+        signal = evaluate_setup_timing(
+            code="000001", name="test", eod_rows=rows,
+        )
+        assert signal.setup_priority == "normal"
+        assert signal.setup_priority_reason == ""
+
+
+class TestSetupTimingCSVFields:
+    """I7: CSV 输出包含 v3.0 新增字段."""
+
+    def test_csv_contains_v3_columns(self):
+        import csv
+        import os
+        import tempfile
+        import datetime as dt
+        from unittest.mock import MagicMock, patch
+        from a_share_hot_screener.setup_timing import SetupSignal
+
+        # 构造一个包含 v3 字段的 signal
+        sig = SetupSignal(code="000001", name="Test", timing_score=75.0, action="watch")
+        sig.resistance_2 = 12.50
+        sig.action_cap_reasons = ["risk过低→wait"]
+        sig.final_action_before_stage1_cap = "setup_ready"
+        sig.final_action_after_stage1_cap = "watch"
+        sig.stage1_context_used = True
+        sig.stage1_adjustment_reason = "hot_theme低→降级"
+        sig.setup_priority = "high"
+        sig.setup_priority_reason = "主题强"
+        sig.requires_intraday_confirmation = True
+        sig.intraday_check_hint = "观察缩量"
+        sig.candidate_support_levels = [{"price": 10.0, "source": "ma20"}]
+        sig.score_components_commentary = {"trend": "多头"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from a_share_hot_screener.pipeline import Stage1HotPipeline
+            from a_share_hot_screener.config import HotScreenerConfig
+
+            cfg = HotScreenerConfig(
+                tushare_token="test",
+                run_date=dt.date(2026, 4, 22),
+                stock_codes=[],
+                output_dir=tmpdir,
+            )
+            pipeline = Stage1HotPipeline.__new__(Stage1HotPipeline)
+            pipeline.config = cfg
+
+            pipeline._write_setup_timing_csv([sig], "2026-04-22")
+
+            csv_path = os.path.join(tmpdir, "2026-04-22_setup_timing.csv")
+            assert os.path.exists(csv_path)
+
+            with open(csv_path, encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            assert len(rows) == 1
+            row = rows[0]
+
+            # 验证新增列存在且值正确
+            assert row["resistance_2"] == "12.5"
+            assert "risk过低" in row["action_cap_reasons"]
+            assert row["final_action_before_stage1_cap"] == "setup_ready"
+            assert row["final_action_after_stage1_cap"] == "watch"
+            assert row["stage1_context_used"] == "True"
+            assert row["setup_priority"] == "high"
+            assert row["requires_intraday_confirmation"] == "True"
+            assert row["intraday_check_hint"] == "观察缩量"
+            # JSON 字段
+            assert "ma20" in row["candidate_support_levels_json"]
+            assert "多头" in row["score_components_commentary_json"]

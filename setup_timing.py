@@ -182,7 +182,9 @@ class SetupSignal:
     stage1_adjustment_reason: Optional[str] = None
     final_action_before_stage1_cap: str = ""
     final_action_after_stage1_cap: str = ""
-    high_priority_watch: bool = False
+    # I11: high_priority_watch → setup_priority / setup_priority_reason
+    setup_priority: str = "normal"       # high / normal / low
+    setup_priority_reason: str = ""
 
     # v3.0 新增: 盘中执行预留
     requires_intraday_confirmation: bool = False
@@ -219,7 +221,10 @@ class SetupSignal:
             "score_components_commentary": self.score_components_commentary,
             "stage1_context_used": self.stage1_context_used,
             "stage1_adjustment_reason": self.stage1_adjustment_reason,
-            "high_priority_watch": self.high_priority_watch,
+            "final_action_before_stage1_cap": self.final_action_before_stage1_cap,
+            "final_action_after_stage1_cap": self.final_action_after_stage1_cap,
+            "setup_priority": self.setup_priority,
+            "setup_priority_reason": self.setup_priority_reason,
             "requires_intraday_confirmation": self.requires_intraday_confirmation,
             "intraday_check_hint": self.intraday_check_hint,
         }
@@ -1970,7 +1975,10 @@ def evaluate_setup_timing(
         )
         signal.action = adjusted_action
         signal.stage1_adjustment_reason = adj_reason
-        signal.high_priority_watch = high_pri
+        # I11: high_priority_watch → setup_priority
+        if high_pri:
+            signal.setup_priority = "high"
+            signal.setup_priority_reason = "Stage1主题强+timing高分"
     signal.final_action_after_stage1_cap = signal.action
 
     # ── 评分维度解释 (v3.0) ────────────────────────────
