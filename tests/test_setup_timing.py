@@ -2355,3 +2355,153 @@ class TestSetupTimingCSVFields:
             # JSON 字段
             assert "ma20" in row["candidate_support_levels_json"]
             assert "多头" in row["score_components_commentary_json"]
+
+
+# ════════════════════════════════════════════════════════
+# 第三批 Integration Fix 测试 (I1/I8/I9)
+# ════════════════════════════════════════════════════════
+
+class TestConfigNesting:
+    """I1: HotScreenerConfig 嵌套 SetupTimingConfig."""
+
+    def test_default_setup_timing_config(self):
+        """HotScreenerConfig 默认包含 SetupTimingConfig."""
+        import datetime as dt
+        from a_share_hot_screener.config import HotScreenerConfig
+        from a_share_hot_screener.setup_timing import SetupTimingConfig
+        cfg = HotScreenerConfig(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 22),
+            stock_codes=[],
+            output_dir="/tmp/test",
+        )
+        assert cfg.setup_timing_config is not None
+        assert isinstance(cfg.setup_timing_config, SetupTimingConfig)
+        # 默认值应与 SetupTimingConfig() 一致
+        assert cfg.setup_timing_config.enable_action_caps is True
+        assert cfg.setup_timing_config.min_stage1_rank_sample_size == 20
+
+    def test_custom_setup_timing_config(self):
+        """可以注入自定义 SetupTimingConfig."""
+        import datetime as dt
+        from a_share_hot_screener.config import HotScreenerConfig
+        from a_share_hot_screener.setup_timing import SetupTimingConfig
+        st_cfg = SetupTimingConfig(enable_action_caps=False, enable_enhanced_market_regime=True)
+        cfg = HotScreenerConfig(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 22),
+            stock_codes=[],
+            output_dir="/tmp/test",
+            setup_timing_config=st_cfg,
+        )
+        assert cfg.setup_timing_config is st_cfg
+        assert cfg.setup_timing_config.enable_action_caps is False
+        assert cfg.setup_timing_config.enable_enhanced_market_regime is True
+
+    def test_config_backward_compatible(self):
+        """旧代码不受嵌套 config 影响."""
+        import datetime as dt
+        from a_share_hot_screener.config import HotScreenerConfig
+        cfg = HotScreenerConfig(
+            tushare_token="test",
+            run_date=dt.date(2026, 4, 22),
+            stock_codes=[],
+            output_dir="/tmp/test",
+        )
+        # 旧字段仍然存在
+        assert cfg.enable_setup_timing is False
+        assert cfg.setup_timing_index_code == "000001.SH"
+
+
+class TestSummaryTimingFields:
+    """I8: summary.csv 包含 timing v3 字段."""
+
+    def test_summary_from_detail_with_timing_v3(self):
+        from a_share_hot_screener.models import HotStockDetail, HotStockSummary
+        d = HotStockDetail(code="000001", name="Test")
+        d.pass_stage1 = True
+        d.setup_timing = {
+            "timing_score": 78.5,
+            "action": "watch",
+            "level_confidence": "medium",
+            "support_basis": "ma20",
+            "ref_reward_risk": 2.1,
+            # v3.0 新增字段
+            "action_cap_reasons": ["risk_score过低→wait"],
+            "stage1_adjustment_reason": "hot_theme低→降级",
+            "final_action_before_stage1_cap": "setup_ready",
+            "final_action_after_stage1_cap": "watch",
+            "setup_priority": "high",
+            "requires_intraday_confirmation": True,
+            "intraday_check_hint": "观察缩量",
+            "resistance_2": 15.80,
+            "market_regime": "risk_off",
+        }
+        s = HotStockSummary.from_detail(d)
+
+        assert s.timing_score == 78.5
+        assert s.timing_action == "watch"
+        assert "risk_score过低" in s.timing_action_cap_reasons
+        assert s.timing_stage1_adjustment_reason == "hot_theme低→降级"
+        assert s.timing_final_action_before_stage1_cap == "setup_ready"
+        assert s.timing_final_action_after_stage1_cap == "watch"
+        assert s.timing_setup_priority == "high"
+        assert s.timing_requires_intraday_confirmation is True
+        assert s.timing_intraday_check_hint == "观察缩量"
+        assert s.timing_resistance_2 == 15.80
+        assert s.timing_market_regime == "risk_off"
+
+    def test_summary_from_detail_without_timing(self):
+        """未启用 setup timing 时字段为默认值."""
+        from a_share_hot_screener.models import HotStockDetail, HotStockSummary
+        d = HotStockDetail(code="000001", name="Test")
+        s = HotStockSummary.from_detail(d)
+        assert s.timing_score is None
+        assert s.timing_action == ""
+        assert s.timing_action_cap_reasons == ""
+        assert s.timing_setup_priority == ""
+        assert s.timing_market_regime == ""
+
+
+class TestMetadataSetupTimingFields:
+    """I9: metadata 包含 setup timing 运行信息."""
+
+    def test_metadata_has_setup_timing_fields(self):
+        from a_share_hot_screener.models import RunMetadata
+        m = RunMetadata()
+        assert hasattr(m, "setup_timing_enabled")
+        assert hasattr(m, "setup_timing_tradeable_count")
+        assert hasattr(m, "setup_timing_signal_count")
+        assert hasattr(m, "setup_timing_market_regime")
+        assert hasattr(m, "setup_timing_enhanced_regime_used")
+        assert hasattr(m, "setup_timing_enhanced_regime_source")
+        assert hasattr(m, "setup_timing_config_snapshot")
+
+    def test_metadata_defaults(self):
+        from a_share_hot_screener.models import RunMetadata
+        m = RunMetadata()
+        assert m.setup_timing_enabled is False
+        assert m.setup_timing_tradeable_count == 0
+        assert m.setup_timing_signal_count == 0
+        assert m.setup_timing_market_regime == ""
+        assert m.setup_timing_enhanced_regime_used is False
+        assert m.setup_timing_config_snapshot == {}
+
+    def test_metadata_serializable(self):
+        """metadata 应可序列化为 JSON."""
+        import json
+        import dataclasses
+        from a_share_hot_screener.models import RunMetadata
+        m = RunMetadata(
+            setup_timing_enabled=True,
+            setup_timing_tradeable_count=50,
+            setup_timing_signal_count=48,
+            setup_timing_market_regime="risk_off",
+            setup_timing_enhanced_regime_used=True,
+            setup_timing_enhanced_regime_source="active",
+            setup_timing_config_snapshot={"enable_action_caps": True},
+        )
+        data = dataclasses.asdict(m)
+        json_str = json.dumps(data, ensure_ascii=False, default=str)
+        assert "setup_timing_enabled" in json_str
+        assert "risk_off" in json_str

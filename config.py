@@ -69,6 +69,9 @@ class HotScreenerConfig:
     # ── Setup Timing (Phase 4: 观察时机 experimental) ──
     enable_setup_timing: bool = False          # 是否启用观察时机评估
     setup_timing_index_code: str = "000001.SH"  # 大盘指数代码 (上证指数)
+    # I1: 嵌套 SetupTimingConfig，控制 setup timing 内部行为
+    # 延迟导入避免循环依赖，在 __post_init__ 中初始化
+    setup_timing_config: object = None  # type: Optional[SetupTimingConfig]
 
     # ── preset 模式（Session 10）──────────────────────────
     # "default": 使用上方默认阈值
@@ -102,6 +105,10 @@ class HotScreenerConfig:
             self.cache_dir = os.path.join(
                 os.path.expanduser("~"), ".a_share_hot_screener", "cache"
             )
+        # I1: 默认初始化 SetupTimingConfig
+        if self.setup_timing_config is None:
+            from a_share_hot_screener.setup_timing import SetupTimingConfig
+            self.setup_timing_config = SetupTimingConfig()
 
     # ── 便捷属性 ─────────────────────────────────────────
 

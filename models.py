@@ -358,6 +358,16 @@ class HotStockSummary:
     timing_level_confidence: str = ""                 # high/medium/low
     timing_support_basis: str = ""                    # ma10/ma20/swing_low/box_low
     timing_ref_reward_risk: Optional[float] = None
+    # I8: v3.0 新增 timing 字段
+    timing_action_cap_reasons: str = ""               # 分号拼接
+    timing_stage1_adjustment_reason: str = ""
+    timing_final_action_before_stage1_cap: str = ""
+    timing_final_action_after_stage1_cap: str = ""
+    timing_setup_priority: str = ""                   # high/normal/low
+    timing_requires_intraday_confirmation: Optional[bool] = None
+    timing_intraday_check_hint: str = ""
+    timing_resistance_2: Optional[float] = None
+    timing_market_regime: str = ""
 
     # ── P0-5: 资金流/股东增减持/融资融券/板块轮动 flags ───
     net_main_inflow_ratio_5d: Optional[float] = None       # TF6 主力净流入占比
@@ -450,6 +460,17 @@ class HotStockSummary:
         kwargs["timing_level_confidence"] = _st.get("level_confidence", "")
         kwargs["timing_support_basis"] = _st.get("support_basis", "")
         kwargs["timing_ref_reward_risk"] = _st.get("ref_reward_risk")
+        # I8: v3.0 新增字段
+        _cap_reasons = _st.get("action_cap_reasons", [])
+        kwargs["timing_action_cap_reasons"] = "; ".join(_cap_reasons) if isinstance(_cap_reasons, list) else str(_cap_reasons)
+        kwargs["timing_stage1_adjustment_reason"] = _st.get("stage1_adjustment_reason") or ""
+        kwargs["timing_final_action_before_stage1_cap"] = _st.get("final_action_before_stage1_cap", "")
+        kwargs["timing_final_action_after_stage1_cap"] = _st.get("final_action_after_stage1_cap", "")
+        kwargs["timing_setup_priority"] = _st.get("setup_priority", "")
+        kwargs["timing_requires_intraday_confirmation"] = _st.get("requires_intraday_confirmation")
+        kwargs["timing_intraday_check_hint"] = _st.get("intraday_check_hint", "")
+        kwargs["timing_resistance_2"] = _st.get("resistance_2")
+        kwargs["timing_market_regime"] = _st.get("market_regime", "")
 
         return cls(**kwargs)
 
@@ -567,6 +588,15 @@ class RunMetadata:
     baseline_pool_stock_count: Optional[int] = None  # Session 12: 基准 pool 中的股票数
     trend_compare_enabled: bool = False             # Session 14: 是否启用了时序对比
     trend_compare_prev_run_date: str = ""            # Session 14: 上次运行日期
+    # I9: Setup Timing 运行信息
+    setup_timing_enabled: bool = False
+    setup_timing_tradeable_count: int = 0
+    setup_timing_signal_count: int = 0
+    setup_timing_market_regime: str = ""           # 实际使用的 regime
+    setup_timing_enhanced_regime_used: bool = False
+    setup_timing_enhanced_regime_source: str = ""  # config_disabled / data_fallback / active
+    setup_timing_config_snapshot: Dict[str, Any] = field(default_factory=dict)
+
     global_warnings: List[str] = field(default_factory=list)
     output_files: Dict[str, str] = field(default_factory=dict)
 

@@ -620,7 +620,7 @@ class Stage1HotPipeline:
             logger.warning("[setup_timing] 获取大盘指数失败: %s", e)
             self.warnings.add_global(f"[setup_timing] 获取大盘指数失败: {e}")
 
-        # I3: 从主配置取 SetupTimingConfig（若存在），否则使用模块默认
+        # I1/I3: 从主配置取 SetupTimingConfig
         setup_timing_cfg: Optional[_SetupTimingConfig] = getattr(
             self.config, "setup_timing_config", None,
         )
@@ -646,6 +646,25 @@ class Stage1HotPipeline:
         # 输出 CSV
         if signals:
             self._write_setup_timing_csv(signals, trade_date_str)
+
+        # I9: 记录 setup timing 运行信息供 metadata 使用
+        _effective_cfg = setup_timing_cfg or _SetupTimingConfig()
+        _regime = signals[0].market_regime if signals else "unknown"
+        _enhanced_used = _effective_cfg.enable_enhanced_market_regime
+        if _enhanced_used:
+            _regime_source = "active" if index_amounts_20d else "data_fallback"
+        else:
+            _regime_source = "config_disabled"
+        import dataclasses as _dc
+        self._setup_timing_meta = {
+            "enabled": True,
+            "tradeable_count": len(tradeable),
+            "signal_count": len(signals),
+            "market_regime": _regime,
+            "enhanced_regime_used": _enhanced_used,
+            "enhanced_regime_source": _regime_source,
+            "config_snapshot": _dc.asdict(_effective_cfg),
+        }
 
         logger.info(
             "[setup_timing] 完成: %d只评估 | setup_ready=%d watch=%d wait=%d avoid=%d",
@@ -851,4 +870,21 @@ class Stage1HotPipeline:
             global_warnings=self.warnings.global_warnings(),
             trend_compare_enabled=trend_compare_enabled,
             trend_compare_prev_run_date=prev_run_date,
+            # I9: setup timing 运行信息
+            setup_timing_enabled=cfg.enable_setup_timing,
+            **self._get_setup_timing_meta(),
         )
+
+    def _get_setup_timing_meta(self) -> Dict[str, Any]:
+        """I9: 返回 setup timing 运行信息字段，供 _build_metadata 解包."""
+        stm = getattr(self, "_setup_timing_meta", None)
+        if not stm:
+            return {}
+        return {
+            "setup_timing_tradeable_count": stm.get("tradeable_count", 0),
+            "setup_timing_signal_count": stm.get("signal_count", 0),
+            "setup_timing_market_regime": stm.get("market_regime", ""),
+            "setup_timing_enhanced_regime_used": stm.get("enhanced_regime_used", False),
+            "setup_timing_enhanced_regime_source": stm.get("enhanced_regime_source", ""),
+            "setup_timing_config_snapshot": stm.get("config_snapshot", {}),
+        }
