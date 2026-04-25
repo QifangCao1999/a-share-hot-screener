@@ -44,7 +44,10 @@ from a_share_hot_screener.scoring import ScoringPool
 from a_share_hot_screener.scoring_aggregator import apply_four_axis_scores
 from a_share_hot_screener.stage1_judge import judge_pass_stage1
 from a_share_hot_screener.context_scores import compute_context_scores
-from a_share_hot_screener.setup_timing import run_setup_timing as _run_setup_timing_batch
+from a_share_hot_screener.setup_timing import (
+    run_setup_timing as _run_setup_timing_batch,
+    SetupTimingConfig as _SetupTimingConfig,
+)
 from a_share_hot_screener.stock_processor import enrich_risk_flow_data, process_single_stock
 from a_share_hot_screener.stock_codes import parse_stock_codes
 from a_share_hot_screener.trend_compare import compute_all_deltas, load_prev_run, PrevRunSnapshot
@@ -618,8 +621,9 @@ class Stage1HotPipeline:
             self.warnings.add_global(f"[setup_timing] 获取大盘指数失败: {e}")
 
         # I3: 从主配置取 SetupTimingConfig（若存在），否则使用模块默认
-        from a_share_hot_screener.setup_timing import SetupTimingConfig as _STConfig
-        setup_timing_cfg: "_STConfig | None" = getattr(self.config, "setup_timing_config", None)
+        setup_timing_cfg: Optional[_SetupTimingConfig] = getattr(
+            self.config, "setup_timing_config", None,
+        )
 
         # 运行评估
         signals = _run_setup_timing_batch(

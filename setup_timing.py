@@ -1365,16 +1365,17 @@ def apply_action_caps(
 
     # ── 规则 12-13: 弱市环境 (I5: 统一 bear/risk_off/ice_point) ──
     if signal.market_regime in WEAK_REGIMES:
+        regime_label = signal.market_regime  # bear / risk_off / ice_point
         if signal.timing_score < cfg.cap_bear_ready_threshold and action == "setup_ready":
             cap_reasons.append(
-                f"bear市且timing={signal.timing_score:.1f}<{cfg.cap_bear_ready_threshold}→不允许setup_ready"
+                f"弱市({regime_label})且timing={signal.timing_score:.1f}<{cfg.cap_bear_ready_threshold}→不允许setup_ready"
             )
             action = _cap_action(action, "watch")
         if signal.risk_score < cfg.cap_bear_min_risk_score:
             new = _cap_action(action, "wait")
             if new != action:
                 cap_reasons.append(
-                    f"bear市且risk_score={signal.risk_score:.2f}<{cfg.cap_bear_min_risk_score}→最高wait"
+                    f"弱市({regime_label})且risk_score={signal.risk_score:.2f}<{cfg.cap_bear_min_risk_score}→最高wait"
                 )
                 action = new
 
